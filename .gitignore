@@ -1,0 +1,151 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyTorch
+*.pth
+*.pt
+*.ckpt
+
+# Training outputs and model checkpoints
+output/
+outputs/
+checkpoints/
+checkpoint-*/
+chkpnt*.pth
+model_*.pth
+*.ply
+results/
+eval/
+logs/
+runs/
+
+# Tensorboard logs
+tensorboard/
+tb_logs/
+events.out.tfevents.*
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment files
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.spyderproject
+.spyproject
+.ropeproject
+
+# OS specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.Spotlight-V100
+.Trashes
+._*
+
+# Data files (typically large)
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+*.gif
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.h5
+*.hdf5
+*.npz
+*.npy
+
+# Compiled extensions
+*.so
+*.dylib
+*.dll
+
+# CUDA
+*.cudafe1.c
+*.cudafe1.cpp
+*.cudafe1.gpu
+*.cudafe1.stub.c
+*.cubin
+*.fatbin
+*.ptx
+
+# Build artifacts from submodules
+submodules/*/build/
+submodules/*/dist/
+submodules/*/__pycache__/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.out
+*.pid
+*.seed
+*.coverage
+.coverage
+.pytest_cache/
+.tox/
+
+# Configuration files that might contain sensitive info
+config.yaml
+config.yml
+secrets.json
+
+# Large dataset directories (add specific paths as needed)
+data/
+datasets/
+scenes/
+images_*/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Profiling data
+*.prof
+
+# Memory dumps
+*.dmp
+
+# Virtual environment markers
+pyvenv.cfg 
