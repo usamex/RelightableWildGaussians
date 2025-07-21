@@ -8,7 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-import glob
+
 import os
 import random
 import json
@@ -40,24 +40,11 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
-        split_file_pattern = os.path.join(args.source_path, "*split.csv")
-        split_files = glob.glob(split_file_pattern)
-
-        if split_files:
-            args.eval_file = split_files[0]
-            print(f"Split file is used: {args.eval_file}")
-        else:
-            args.eval_file = None
-            print("WARNING: No split file found. Please check if one exists in the directory or modify scene/init.py.")
-
         if os.path.exists(os.path.join(args.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, args.eval_file)
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.eval_file)
-        elif os.path.exists(os.path.join(args.source_path, "metadata.json")):
-            print("Found metadata.json file, assuming multi scale Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Multi-scale"](args.source_path, args.white_background, args.eval, args.load_allres)
+            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
         else:
             assert False, "Could not recognize scene type!"
 
@@ -86,7 +73,7 @@ class Scene:
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
             print("Loading Test Cameras", len(scene_info.test_cameras))
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
-
+        
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",

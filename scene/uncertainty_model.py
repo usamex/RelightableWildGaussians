@@ -1,174 +1,35 @@
+from scene import dinov2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import itertools
-import urllib.request
-import io
-import os
 import numpy as np
-from typing import Optional, Any
+import os
+import io
+import urllib.request
+from typing import Optional
 from torch import Tensor
-from arguments import OptimizationParams
-from utils.loss_utils import ssim
-
-
-def convert_image_dtype(image: np.ndarray, dtype) -> np.ndarray:
-    """Convert image to specified dtype with proper scaling."""
-    if image.dtype == dtype:
-        return image
-    
-    if image.dtype == np.uint8 and dtype == np.float32:
-        return image.astype(dtype) / 255.0
-    elif image.dtype == np.float32 and dtype == np.uint8:
-        return (image * 255.0).astype(dtype)
-    else:
-        return image.astype(dtype)
-
-
-# DINOv2 model loading function (simplified version)
-def load_dinov2_model(backbone_name: str, pretrained: bool = True):
-    """Load DINOv2 model - simplified version for this codebase."""
-    try:
-        import torch.hub
-        model = torch.hub.load('facebookresearch/dinov2', backbone_name, pretrained=pretrained)
-        return model
-    except Exception as e:
-        print(f"Failed to load DINOv2 model {backbone_name}: {e}")
-        # Fallback to a simple CNN backbone
-        class SimpleCNN(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.patch_size = 14
-                self.embed_dim = 384
-                self.num_heads = 12
-                self.features = nn.Sequential(
-                    nn.Conv2d(3, 64, 7, stride=2, padding=3),
-                    nn.ReLU(),
-                    nn.Conv2d(64, 128, 3, stride=2, padding=1),
-                    nn.ReLU(),
-                    nn.Conv2d(128, 256, 3, stride=2, padding=1),
-                    nn.ReLU(),
-                    nn.Conv2d(256, 384, 3, stride=2, padding=1),
-                    nn.ReLU(),
-                )
-                
-            def get_intermediate_layers(self, x, n=None, reshape=True):
-                features = self.features(x)
-                if reshape:
-                    # Reshape to match DINOv2 output format
-                    B, C, H, W = features.shape
-                    features = features.view(B, C, H * W).transpose(1, 2)
-                    features = features.view(B, H, W, C).permute(0, 3, 1, 2)
-                return [features]
-        
-        return SimpleCNN()
-
-
-def ssim_down(x, y, max_size=None):
-    osize = x.shape[2:]
-    if max_size is not None:
-        scale_factor = max(max_size/x.shape[-2], max_size/x.shape[-1])
-        x = F.interpolate(x, scale_factor=scale_factor, mode='area')
-        y = F.interpolate(y, scale_factor=scale_factor, mode='area')
-    out = ssim(x, y, size_average=False).unsqueeze(1)
-    if max_size is not None:
-        out = F.interpolate(out, size=osize, mode='bilinear', align_corners=False)
-    return out.squeeze(1)
-
-
-def _ssim_parts(img1, img2, window_size=11):
-    sigma = 1.5
-    channel = img1.size(-3)
-    # Create window
-    gauss = torch.Tensor([math.exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
-    _1D_window = (gauss / gauss.sum()).unsqueeze(1)
-    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
-    window = window.to(img1.device).type_as(img1)
-
-    mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
-    mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
-
-    mu1_sq = mu1.pow(2)
-    mu2_sq = mu2.pow(2)
-    mu1_mu2 = mu1 * mu2
-
-    sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
-    sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
-    sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
-    sigma1 = torch.sqrt(sigma1_sq.clamp_min(0))
-    sigma2 = torch.sqrt(sigma2_sq.clamp_min(0))
-
-    C1 = 0.01 ** 2
-    C2 = 0.03 ** 2
-    C3 = C2 / 2
-
-    luminance = (2 * mu1_mu2 + C1) / (mu1_sq + mu2_sq + C1)
-    contrast = (2 * sigma1 * sigma2 + C2) / (sigma1_sq + sigma2_sq + C2)
-    structure = (sigma12 + C3) / (sigma1 * sigma2 + C3)
-    return luminance, contrast, structure
-
-
-def msssim(x, y, max_size=None, min_size=200):
-    raw_orig_size = x.shape[-2:]
-    if max_size is not None:
-        scale_factor = min(1, max(max_size/x.shape[-2], max_size/x.shape[-1]))
-        x = F.interpolate(x, scale_factor=scale_factor, mode='area')
-        y = F.interpolate(y, scale_factor=scale_factor, mode='area')
-
-    ssim_maps = list(_ssim_parts(x, y))
-    orig_size = x.shape[-2:]
-    while x.shape[-2] > min_size and x.shape[-1] > min_size:
-        x = F.avg_pool2d(x, 2)
-        y = F.avg_pool2d(y, 2)
-        ssim_maps.extend(tuple(F.interpolate(x, size=orig_size, mode='bilinear') for x in _ssim_parts(x, y)[1:]))
-    out = torch.stack(ssim_maps, -1).prod(-1)
-    if max_size is not None:
-        out = F.interpolate(out, size=raw_orig_size, mode='bilinear')
-    return out.mean(1)
-
-
-def dino_downsample(x, max_size=None):
-    if max_size is None:
-        return x
-    h, w = x.shape[2:]
-    if max_size < h or max_size < w:
-        scale_factor = min(max_size/x.shape[-2], max_size/x.shape[-1])
-        nh = int(h * scale_factor)
-        nw = int(w * scale_factor)
-        nh = ((nh + 13) // 14) * 14
-        nw = ((nw + 13) // 14) * 14
-        x = F.interpolate(x, size=(nh, nw), mode='bilinear')
-    return x
-
-
-def assert_not_none(value: Optional[Any]) -> Any:
-    assert value is not None
-    return value
-
+import itertools
+from utils.loss_utils import ssim_down, msssim, dino_downsample
+from utils.image_utils import convert_image_dtype
+from utils.general_utils import assert_not_none
 
 class UncertaintyModel(nn.Module):
-    """Uncertainty prediction model based on DINOv2 backbone."""
-    
     img_norm_mean: Tensor
     img_norm_std: Tensor
 
-    def __init__(self, config: OptimizationParams):
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        # Load DINOv2 backbone
-        self.backbone = load_dinov2_model(config.uncertainty_backbone, pretrained=True)
-        self.patch_size = getattr(self.backbone, 'patch_size', 14)
-        in_features = getattr(self.backbone, 'embed_dim', 384)
-        
-        # Segmentation head
+
+        self.backbone = getattr(dinov2, config.uncertainty_backbone)(pretrained=True)
+        self.patch_size = self.backbone.patch_size
+        in_features = self.backbone.embed_dim
         self.conv_seg = nn.Conv2d(in_features, 1, kernel_size=1)
         self.bn = nn.SyncBatchNorm(in_features)
         nn.init.normal_(self.conv_seg.weight.data, 0, 0.01)
         nn.init.zeros_(assert_not_none(self.conv_seg.bias).data)
 
-        # Image normalization parameters (DINOv2 standard)
         img_norm_mean = torch.tensor([123.675, 116.28, 103.53], dtype=torch.float32)
         img_norm_std = torch.tensor([58.395, 57.12, 57.375], dtype=torch.float32)
         self.register_buffer("img_norm_mean", img_norm_mean / 255.)
@@ -176,7 +37,7 @@ class UncertaintyModel(nn.Module):
 
         self._images_cache = {}
 
-        # Freeze DINOv2 backbone parameters
+        # Freeze dinov2 backbone
         for p in self.backbone.parameters():
             p.requires_grad = False
 
@@ -188,41 +49,23 @@ class UncertaintyModel(nn.Module):
         return pad_size_left, pad_size_right
 
     def _initialize_head_from_checkpoint(self):
-        """Initialize segmentation head from pre-trained ADE20K checkpoint."""
-        try:
-            # ADA20 classes to ignore (these classes are typically problematic)
-            cls_to_ignore = [13, 21, 81, 84]
-            
-            # Download pre-trained checkpoint
-            backbone = self.config.uncertainty_backbone
-            url = f"https://dl.fbaipublicfiles.com/dinov2/{backbone}/{backbone}_ade20k_linear_head.pth"
-            
-            print(f"Downloading pre-trained head from: {url}")
-            with urllib.request.urlopen(url) as f:
-                checkpoint_data = f.read()
-            
-            checkpoint = torch.load(io.BytesIO(checkpoint_data), map_location="cpu")
-            old_weight = checkpoint["state_dict"]["decode_head.conv_seg.weight"]
-            
-            # Initialize new weight tensor
-            new_weight = torch.empty(1, old_weight.shape[1], 1, 1)
-            nn.init.normal_(new_weight, 0, 0.0001)
-            new_weight[:, cls_to_ignore] = old_weight[:, cls_to_ignore] * 1000
-            
-            # Apply weights
-            nn.init.zeros_(assert_not_none(self.conv_seg.bias).data)
-            self.conv_seg.weight.data.copy_(new_weight)
+        # ADA20 classes to ignore
+        cls_to_ignore = [13, 21, 81, 84]
+        # Pull the checkpoint
+        backbone = self.config.uncertainty_backbone
+        url = f"https://dl.fbaipublicfiles.com/dinov2/{backbone}/{backbone}_ade20k_linear_head.pth"
+        with urllib.request.urlopen(url) as f:
+            checkpoint_data = f.read()
+        checkpoint = torch.load(io.BytesIO(checkpoint_data), map_location="cpu")
+        old_weight = checkpoint["state_dict"]["decode_head.conv_seg.weight"]
+        new_weight = torch.empty(1, old_weight.shape[1], 1, 1)
+        nn.init.normal_(new_weight, 0, 0.0001)
+        new_weight[:, cls_to_ignore] = old_weight[:, cls_to_ignore] * 1000
+        nn.init.zeros_(assert_not_none(self.conv_seg.bias).data)
+        self.conv_seg.weight.data.copy_(new_weight)
 
-            # Load batch normalization parameters
-            bn_state_dict = {k[len("decode_head.bn."):]: v for k, v in checkpoint["state_dict"].items() 
-                           if k.startswith("decode_head.bn.")}
-            self.bn.load_state_dict(bn_state_dict)
-            
-            print("Successfully initialized head from pre-trained checkpoint")
-            
-        except Exception as e:
-            print(f"Failed to initialize head from checkpoint: {e}")
-            print("Using random initialization instead")
+        # Load the bn data
+        self.bn.load_state_dict({k[len("decode_head.bn."):]: v for k, v in checkpoint["state_dict"].items() if k.startswith("decode_head.bn.")})
 
     def _get_dino_cached(self, x, cache_entry=None):
         if cache_entry is None or (cache_entry, x.shape) not in self._images_cache:
@@ -246,12 +89,14 @@ class UncertaintyModel(nn.Module):
             nw = ((nw + 13) // 14) * 14
             x = F.interpolate(x, size=(nh, nw), mode='bilinear')
             y = F.interpolate(y, size=(nh, nw), mode='bilinear')
+
         x = (x - self.img_norm_mean[None, :, None, None]) / self.img_norm_std[None, :, None, None]
         y = (y - self.img_norm_mean[None, :, None, None]) / self.img_norm_std[None, :, None, None]
         pads = list(itertools.chain.from_iterable(self._get_pad(m) for m in x.shape[:1:-1]))
         x = F.pad(x, pads)
         padded_shape = x.shape
         y = F.pad(y, pads)
+
         with torch.no_grad():
             x = self._get_dino_cached(x, _x_cache)
             y = self._get_dino_cached(y, _y_cache)
@@ -265,69 +110,56 @@ class UncertaintyModel(nn.Module):
             cosine = F.interpolate(cosine, size=(h, w), mode='bilinear', align_corners=False)
         return cosine.squeeze(1)
     
-    def _forward_uncertainty_features(self, inputs: Tensor, _cache_entry: Optional[str] = None) -> Tensor:
-        """Forward pass through the uncertainty network."""
-        # Normalize input data using DINOv2 normalization
-        inputs = inputs.to(self.img_norm_mean.device)
+    def _forward_uncertainty_features(self, inputs: Tensor, _cache_entry=None) -> Tensor:
+        # Normalize data
         inputs = (inputs - self.img_norm_mean[None, :, None, None]) / self.img_norm_std[None, :, None, None]
         h, w = inputs.shape[2:]
-        
-        # Apply padding to make dimensions compatible with patch size
         pads = list(itertools.chain.from_iterable(self._get_pad(m) for m in inputs.shape[:1:-1]))
         inputs = F.pad(inputs, pads)
 
-        # Extract features using DINOv2 backbone
         x = self._get_dino_cached(inputs, _cache_entry)
 
-        # Apply dropout and batch normalization
         x = F.dropout2d(x, p=self.config.uncertainty_dropout, training=self.training)
         x = self.bn(x)
-        
-        # Apply segmentation head
         logits = self.conv_seg(x)
-        # Add bias term for proper initialization
+        # We could also do this using weight init, 
+        # but we want to have a prior then doing L2 regularization
         logits = logits + math.log(math.exp(1) - 1)
 
-        # Apply softplus activation and rescale to input size
+        # Rescale to input size
         logits = F.softplus(logits)
-        logits = F.interpolate(logits, size=inputs.shape[2:], mode="bilinear", align_corners=False)
+        logits: Tensor = F.interpolate(logits, size=inputs.shape[2:], mode="bilinear", align_corners=False)
         logits = logits.clamp(min=self.config.uncertainty_clip_min)
 
-        # Remove padding
+        # Add padding
         logits = logits[:, :, pads[2]:h+pads[2], pads[0]:w+pads[0]]
         return logits
 
     @property
-    def device(self) -> torch.device:
-        """Get the device of the model."""
+    def device(self):
         return self.img_norm_mean.device
 
-    def forward(self, image: Tensor, _cache_entry: Optional[str] = None) -> Tensor:
-        """Forward pass of the uncertainty model."""
+    def forward(self, image: Tensor, _cache_entry=None):
         return self._forward_uncertainty_features(image, _cache_entry=_cache_entry)
 
     def setup_data(self, train_dataset, test_dataset):
-        """Setup training and test datasets for the model."""
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
 
-    def _load_image(self, img: np.ndarray) -> Tensor:
-        """Load and preprocess image for the model."""
+    def _load_image(self, img):
         return torch.from_numpy(np.moveaxis(convert_image_dtype(img, np.float32), -1, 0)[None]).to(self.device)
 
-    def _scale_input(self, x: Tensor, max_size: Optional[int] = 504) -> Tensor:
-        """Scale input tensor to maximum size while preserving aspect ratio."""
-        h, w = x.shape[2:]
+    def _scale_input(self, x, max_size: Optional[int] = 504):
+        h, w = nh, nw = x.shape[2:]
         if max_size is not None:
-            scale_factor = min(max_size/h, max_size/w)
+            scale_factor = min(max_size/x.shape[-2], max_size/x.shape[-1])
             if scale_factor >= 1:
                 return x
             nw = int(w * scale_factor)
             nh = int(h * scale_factor)
-            # Ensure dimensions are compatible with patch size (14x14)
             nh = ((nh + 13) // 14) * 14
             nw = ((nw + 13) // 14) * 14
-            x = F.interpolate(x, size=(nh, nw), mode='bilinear', align_corners=False)
+            x = F.interpolate(x, size=(nh, nw), mode='bilinear')
         return x
 
     def _dino_plus_ssim(self, gt, prediction, _cache_entry=None, max_size=None):
@@ -413,8 +245,7 @@ class UncertaintyModel(nn.Module):
         }
         return loss, metrics, loss_mult.detach()
 
-    def get_loss(self, gt_image: Tensor, image: Tensor, prefix: str = '', _cache_entry: Optional[str] = None):
-        """Compute uncertainty loss and metrics."""
+    def get_loss(self, gt_image, image, prefix='', _cache_entry=None):
         gt_torch = gt_image.unsqueeze(0)
         image = image.unsqueeze(0)
         loss, metrics, loss_mult = self._compute_losses(gt_torch, image, prefix, _cache_entry=_cache_entry)
@@ -424,35 +255,15 @@ class UncertaintyModel(nn.Module):
         return loss, metrics, loss_mult
 
     @staticmethod
-    def load(path: str, config: Optional[OptimizationParams] = None):
-        """Load uncertainty model from checkpoint."""
-        checkpoint_path = os.path.join(path, "uncertainty_checkpoint.pth")
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Uncertainty checkpoint not found at {checkpoint_path}")
-            
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
-        
-        if config is None:
-            # Try to load config from checkpoint
-            config_dict = ckpt.pop("config", {})
-            config = OptimizationParams(None)  # Create default config
-            # Update config with saved values
-            for key, value in config_dict.items():
-                if hasattr(config, key):
-                    setattr(config, key, value)
-        
+    def load(path: str):
+        ckpt = torch.load(os.path.join(path, "checkpoint.pth"), map_location="cpu")
+        config = ckpt.pop("config") # TODO: Fix this
         model = UncertaintyModel(config)
         model.load_state_dict(ckpt, strict=False)
         return model
 
     def save(self, path: str):
-        """Save uncertainty model checkpoint."""
-        os.makedirs(path, exist_ok=True)
         state = self.state_dict()
-        # Save config as dict
-        config_dict = {}
-        for key in dir(self.config):
-            if not key.startswith('_') and not callable(getattr(self.config, key)):
-                config_dict[key] = getattr(self.config, key)
-        state["config"] = config_dict
-        torch.save(state, os.path.join(path, "uncertainty_checkpoint.pth"))
+        state["config"] = self.config # TODO: Fix this
+        torch.save(state, os.path.join(path, "checkpoint.pth"))
+

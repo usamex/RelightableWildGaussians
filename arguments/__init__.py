@@ -10,12 +10,12 @@
 #
 
 from argparse import ArgumentParser, Namespace
+from typing import Optional
 import sys
 import os
 
 class GroupParams:
     pass
-
 
 class ParamGroup:
     def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
@@ -45,25 +45,17 @@ class ParamGroup:
                 setattr(group, arg[0], arg[1])
         return group
 
-
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
         self._source_path = ""
-        self.eval_file = ""
-        self._model_path = "output"
+        self._model_path = ""
         self._images = "images"
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
-        self._kernel_size = 0.0
-        # self.use_spatial_gaussian_bias = False
-        self.ray_jitter = False
-        self.resample_gt_image = False
-        self.load_allres = False
-        self.sample_more_highres = False
-        self.use_decoupled_appearance = True
+        self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -71,59 +63,59 @@ class ModelParams(ParamGroup):
         g.source_path = os.path.abspath(g.source_path)
         return g
 
-
 class PipelineParams(ParamGroup):
     def __init__(self, parser):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
-        self.compute_view2gaussian_python = False
+        self.depth_ratio = 0.0
         self.debug = False
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 100_000
+        self.iterations = 200_000
         self.position_lr_init = 0.000016
         self.position_lr_final = 0.00000016
         self.position_lr_delay_mult = 0.01
-        self.position_lr_max_steps = 100_000
+        self.position_lr_max_steps = 200_000
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
-        self.scaling_lr = 0.005
+        self.scaling_lr = 0.0005
         self.rotation_lr = 0.001
-        self.appearance_embeddings_lr = 0.001
-        self.appearance_network_lr = 0.001
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
-        self.lambda_distortion = 100
-        self.lambda_depth_normal = 0.05
-        self.distortion_from_iter = 15000
-        self.depth_normal_from_iter = 15000
-        self.densification_interval = 100
-        self.opacity_reset_interval = 3000
-        self.densify_from_iter = 2000
-        self.densify_until_iter = 50_000
+        self.lambda_dist = 0.0
+        self.lambda_normal = 0.05
+        self.opacity_cull = 0.05
+
+        self.densification_interval = 400
+        self.opacity_reset_interval = 15_000
+        self.densify_from_iter = 4000
+        self.densify_until_iter = 100_000
         self.densify_grad_threshold = 0.0002
-        # Uncertainty model
+        self.uncertainty_lr = 0.001
+        super().__init__(parser, "Optimization Parameters")
+
+class UncertaintyParams(ParamGroup):
+    def __init__(self, parser):
         self.uncertainty_mode = "dino"
         self.uncertainty_backbone = "dinov2_vits14_reg"
         self.uncertainty_regularizer_weight = 0.5
-        self.uncertainty_clip_min = 0.1
-        self.uncertainty_mask_clip_max = None
-        self.uncertainty_dssim_clip_max = 1.0  # 0.05 -> 0.005
-        self.uncertainty_lr = 0.001
-        self.uncertainty_dropout = 0.5
-        self.uncertainty_dino_max_size = None
-        self.uncertainty_scale_grad = False
-        self.uncertainty_center_mult = False
-        self.uncertainty_after_opacity_reset = 1000
-        self.uncertainty_protected_iters = 500
-        self.uncertainty_preserve_sky = False
+        self.uncertainty_clip_min: float = 0.1
+        self.uncertainty_mask_clip_max: Optional[float] = None
+        self.uncertainty_dssim_clip_max: float = 1.0  # 0.05 -> 0.005
+        self.uncertainty_dropout: float = 0.5
+        self.uncertainty_dino_max_size: Optional[int] = None
+        self.uncertainty_scale_grad: bool = False
+        self.uncertainty_center_mult: bool = False
+        # self.uncertainty_lr: float = 0.001
+        self.uncertainty_after_opacity_reset: int = 1000
+        self.uncertainty_protected_iters: int = 1500
+        self.uncertainty_preserve_sky: bool = False
 
-        self.uncertainty_warmup_iters = 5000
-        self.uncertainty_warmup_start = 35000
-
-        super().__init__(parser, "Optimization Parameters")
+        self.uncertainty_warmup_iters: int = 5_000
+        self.uncertainty_warmup_start: int = 35_000
+        super().__init__(parser, "Uncertainty Parameters")
 
 
 def get_combined_args(parser : ArgumentParser):
