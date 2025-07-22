@@ -70,9 +70,9 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
 
         # Pick a random Camera
         if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam_id = randint(0, len(viewpoint_stack)-1)
-        viewpoint_cam = viewpoint_stack.pop(viewpoint_cam_id)
+            viewpoint_stack = list(range(len(scene.getTrainCameras())))
+        viewpoint_cam_id = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        viewpoint_cam = scene.getTrainCameras()[viewpoint_cam_id]
         
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
@@ -84,6 +84,7 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
         loss_mult = 1.0
         
         if gaussians.uncertainty_model is not None:
+            del loss_mult
             # Compute uncertainty loss and multipliers
             uncertainty_loss, uncertainty_metrics, loss_mult = gaussians.uncertainty_model.get_loss(
                 gt_image, 
