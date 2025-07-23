@@ -148,4 +148,7 @@ images_*/
 *.dmp
 
 # Virtual environment markers
-pyvenv.cfg 
+pyvenv.cfg
+
+# Outputs
+output*
