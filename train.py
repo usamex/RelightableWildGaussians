@@ -107,9 +107,9 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
 
         # Pick a random Camera
         if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam_id = randint(0, len(viewpoint_stack)-1)
-        viewpoint_cam = viewpoint_stack.pop(viewpoint_cam_id)
+            viewpoint_stack = list(range(len(scene.getTrainCameras())))
+        viewpoint_cam_id = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        viewpoint_cam = scene.getTrainCameras()[viewpoint_cam_id]
         
 
         if (iter - 1) == debug_from:
