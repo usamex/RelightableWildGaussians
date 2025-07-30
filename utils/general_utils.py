@@ -131,3 +131,9 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+
+def assert_not_none(value):
+    """Helper function for uncertainty model"""
+    if value is None:
+        raise ValueError("Value cannot be None")
+    return value

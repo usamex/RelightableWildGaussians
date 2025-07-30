@@ -15,74 +15,32 @@ from torch.autograd import Variable
 from math import exp
 
 def l1_loss(network_output, gt):
-    return F.l1_loss(network_output, gt, reduction="mean")
+    return torch.abs((network_output - gt)).mean()
 
 def l2_loss(network_output, gt):
-    return F.mse_loss(network_output, gt, reduction="mean")
+    return ((network_output - gt) ** 2).mean()
 
-def gaussian(window_size: int, sigma: float) -> torch.Tensor:
-    """
-    Creates a 1D Gaussian kernel.
-
-    Args:
-        window_size (int): Size of the window (number of elements).
-        sigma (float): Standard deviation of the Gaussian.
-
-    Returns:
-        torch.Tensor: Normalized 1D Gaussian kernel of shape (window_size,).
-    """
+def gaussian(window_size: int, sigma: float):
     center = window_size // 2
     values = [exp(-(x - center) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)]
-    kernel = torch.tensor(values, dtype=torch.float32)
+    kernel = torch.Tensor(values, dtype=torch.float32)
     return kernel / kernel.sum()
 
-def create_window(window_size: int, channel: int) -> torch.Tensor:
-    """
-    Creates a 2D Gaussian window.
-
-    Args:
-        window_size (int): Size of the window (number of elements).
-        channel (int): Number of channels.
-
-    Returns:
-        torch.Tensor: Normalized 2D Gaussian window of shape (channel, 1, window_size, window_size).
-    """
-    _1D_window = gaussian(window_size, sigma=1.5).unsqueeze(1)
-    _2D_window = _1D_window @ _1D_window.T
-    _2D_window = _2D_window.unsqueeze(0).unsqueeze(0)
-    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+def create_window(window_size: int, channel: int):
+    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
+    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
     return window
 
-def ssim(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, size_average: bool = True) -> torch.Tensor:
-    """
-    Computes the Structural Similarity Index (SSIM) between two images.
-
-    Args:
-        img1 (torch.Tensor): First image.
-        img2 (torch.Tensor): Second image.
-        window_size (int): Size of the window.
-        size_average (bool): Whether to average the SSIM over the image.
-    """
-    channel = img1.size(-3) # Expects img1 to be (B, C, H, W)
+def ssim(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, size_average: bool = True):
+    channel = img1.size(-3)
     window = create_window(window_size, channel)
-
     if img1.is_cuda:
         window = window.to(img1.device)
     window = window.type_as(img1)
-
     return _ssim(img1, img2, window, window_size, channel, size_average)
 
-def _ssim(img1: torch.Tensor, img2: torch.Tensor, window: torch.Tensor, window_size: int, channel: int, size_average: bool) -> torch.Tensor:
-    """
-    Internal function to compute SSIM given a precomputed Gaussian window.
-
-    Args:
-        img1 (torch.Tensor): First image.
-        img2 (torch.Tensor): Second image.
-        window (torch.Tensor): 2D Gaussian window.
-        window_size (int): Size of the window.
-    """
-
+def _ssim(img1: torch.Tensor, img2: torch.Tensor, window: torch.Tensor, window_size: int, channel: int, size_average: bool=True):
     padding = window_size // 2
     mu1 = F.conv2d(img1, window, padding=padding, groups=channel)
     mu2 = F.conv2d(img2, window, padding=padding, groups=channel)
@@ -104,3 +62,82 @@ def _ssim(img1: torch.Tensor, img2: torch.Tensor, window: torch.Tensor, window_s
         return ssim_map.mean()
     else:
         return ssim_map.mean(-3)
+
+
+
+def ssim_down(x, y, max_size=None):
+    osize = x.shape[2:]
+    if max_size is not None:
+        scale_factor = max(max_size/x.shape[-2], max_size/x.shape[-1])
+        x = F.interpolate(x, scale_factor=scale_factor, mode='area')
+        y = F.interpolate(y, scale_factor=scale_factor, mode='area')
+    out = ssim(x, y, size_average=False).unsqueeze(1)
+    if max_size is not None:
+        out = F.interpolate(out, size=osize, mode='bilinear', align_corners=False)
+    return out.squeeze(1)
+
+
+def _ssim_parts(img1, img2, window_size=11):
+    sigma = 1.5
+    channel = img1.size(-3)
+    # Create window
+    gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
+    _1D_window = (gauss / gauss.sum()).unsqueeze(1)
+    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+    window = window.to(img1.device).type_as(img1)
+
+    mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
+    mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
+    sigma1 = torch.sqrt(sigma1_sq.clamp_min(0))
+    sigma2 = torch.sqrt(sigma2_sq.clamp_min(0))
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    C3 = C2 / 2
+
+    luminance = (2 * mu1_mu2 + C1) / (mu1_sq + mu2_sq + C1)
+    contrast = (2 * sigma1 * sigma2 + C2) / (sigma1_sq + sigma2_sq + C2)
+    structure = (sigma12 + C3) / (sigma1 * sigma2 + C3)
+    return luminance, contrast, structure
+
+
+def msssim(x, y, max_size=None, min_size=200):
+    raw_orig_size = x.shape[-2:]
+    if max_size is not None:
+        scale_factor = min(1, max(max_size/x.shape[-2], max_size/x.shape[-1]))
+        x = F.interpolate(x, scale_factor=scale_factor, mode='area')
+        y = F.interpolate(y, scale_factor=scale_factor, mode='area')
+
+    ssim_maps = list(_ssim_parts(x, y))
+    orig_size = x.shape[-2:]
+    while x.shape[-2] > min_size and x.shape[-1] > min_size:
+        x = F.avg_pool2d(x, 2)
+        y = F.avg_pool2d(y, 2)
+        ssim_maps.extend(tuple(F.interpolate(x, size=orig_size, mode='bilinear') for x in _ssim_parts(x, y)[1:]))
+    out = torch.stack(ssim_maps, -1).prod(-1)
+    if max_size is not None:
+        out = F.interpolate(out, size=raw_orig_size, mode='bilinear')
+    return out.mean(1)
+
+
+def dino_downsample(x, max_size=None):
+    if max_size is None:
+        return x
+    h, w = x.shape[2:]
+    if max_size < h or max_size < w:
+        scale_factor = min(max_size/x.shape[-2], max_size/x.shape[-1])
+        nh = int(h * scale_factor)
+        nw = int(w * scale_factor)
+        nh = ((nh + 13) // 14) * 14
+        nw = ((nw + 13) // 14) * 14
+        x = F.interpolate(x, size=(nh, nw), mode='bilinear')
+    return x

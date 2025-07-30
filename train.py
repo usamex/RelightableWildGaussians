@@ -24,8 +24,7 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams
-from scene.uncertainty_model import UncertaintyModel
+from arguments import ModelParams, PipelineParams, OptimizationParams, UncertaintyParams
 from typing import Optional
 
 try:
@@ -34,7 +33,6 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-import time
 from utils.vis_utils import apply_depth_colormap, colormap
 from utils.depth_utils import depth_to_normal
 
@@ -66,10 +64,10 @@ def L1_loss_appearance(image, gt_image, gaussians, view_idx, return_transformed_
         transformed_image = torch.nn.functional.interpolate(transformed_image, size=(origH, origW), mode="bilinear", align_corners=True)[0]
         return transformed_image
 
-def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, uncertainty_model : Optional[UncertaintyModel] = None):
+def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, unc: UncertaintyParams, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, uncertainty_model : Optional[UncertaintyModel] = None):
     iteration = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree)
+    gaussians = GaussianModel(dataset.sh_degree, uncertainty_config=unc)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -94,6 +92,10 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
+    ema_dist_for_log = 0.0
+    ema_normal_for_log = 0.0
+    ema_uncertainty_for_log = 0.0
+
     progress_bar = tqdm(range(iteration, opt.iterations), desc="Training progress")
     iteration += 1 # Gaussian Splatting is 1-indexed
     for iter in range(iteration, opt.iterations + 1):
@@ -123,46 +125,49 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
         # image_toned  = None # TODO: add image_toned rendering[:3, :, :] probably
         gt_image = viewpoint_cam.original_image.to(dataset.data_device)
         uncertainty_loss = 0
-        metrics = {}
+        uncertainty_metrics = {}
         loss_mult = 1.0
-        if uncertainty_model is not None:
+
+        if gaussians.uncertainty_model is not None:
             del loss_mult
-            uncertainty_loss, metrics, loss_mult = uncertainty_model.get_loss(gt_image, image.detach(), _cache_entry=('train', viewpoint_cam_id))
+            uncertainty_loss, uncertainty_metrics, loss_mult = gaussians.uncertainty_model.get_loss(gt_image, image.detach(), _cache_entry=('train', viewpoint_cam_id))
             # uncertainty_warmup_iters: int = 0
             # uncertainty_warmup_start: int = 0
 
             loss_mult = (loss_mult > 1).to(dtype=loss_mult.dtype)
 
-            if iter < opt.uncertainty_warmup_start:
+            if iter < unc.uncertainty_warmup_start:
                 loss_mult = 1
-            elif iter < opt.uncertainty_warmup_start + opt.uncertainty_warmup_iters:
-                p = (iter - opt.uncertainty_warmup_start) / opt.uncertainty_warmup_iters
+            elif iter < unc.uncertainty_warmup_start + unc.uncertainty_warmup_iters:
+                p = (iter - unc.uncertainty_warmup_start) / unc.uncertainty_warmup_iters
                 loss_mult = 1 + p * (loss_mult - 1)
-            if opt.uncertainty_center_mult:
+            if unc.uncertainty_center_mult:
                 loss_mult = loss_mult.sub(loss_mult.mean() - 1).clamp(0, 2)
-            if opt.uncertainty_scale_grad:
+            if unc.uncertainty_scale_grad:
                 image = scale_grads(image, loss_mult)
                 # image_toned = scale_grads(image_toned, loss_mult)
                 loss_mult = 1
 
 
-        Ll1 = l1_loss(image, gt_image)
-        ssim_value = ssim(image, gt_image)
+        Ll1 = torch.nn.functional.l1_loss(image, gt_image, reduction='none')
+        ssim_value = ssim(image, gt_image, size_average=False)
         # use L1 loss for the transformed image if using decoupled appearance
         if dataset.use_decoupled_appearance:
             Ll1 = L1_loss_appearance(image, gt_image, gaussians, viewpoint_cam.idx)
 
         # Detach uncertainty loss if in protected iter after opacity reset
-        last_densify_iter = min(iter, opt.densify_until_iter - 1)
-        last_dentify_iter = (last_densify_iter // opt.opacity_reset_interval) * opt.opacity_reset_interval
-        if iter < last_dentify_iter + opt.uncertainty_protected_iters:
-            # Keep track of max radii in image-space for pruning
-            try:
-                uncertainty_loss = uncertainty_loss.detach()  # type: ignore
-            except AttributeError:
-                pass
+        if gaussians.uncertainty_model is not None:
 
-        rgb_loss = (1.0 - opt.lambda_dssim) * (Ll1 * loss_mult).mean() + opt.lambda_dssim * ((1.0 - ssim_value) * loss_mult).mean() + uncertainty_loss
+            last_densify_iter = min(iter, opt.densify_until_iter - 1)
+            last_dentify_iter = (last_densify_iter // opt.opacity_reset_interval) * opt.opacity_reset_interval
+            if iter < last_dentify_iter + unc.uncertainty_protected_iters:
+                # Keep track of max radii in image-space for pruning
+                try:
+                    uncertainty_loss = uncertainty_loss.detach()  # type: ignore
+                except AttributeError:
+                    pass
+
+        rgb_loss = (1.0 - opt.lambda_dssim) * (Ll1 * loss_mult).mean() + opt.lambda_dssim * ((1.0 - ssim_value) * loss_mult).mean()
 
         # depth distortion regularization
         distortion_map = rendering[8, :, :]
@@ -247,7 +252,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
                 progress_bar.close()            
 
             # Log and save
-            training_report(tb_writer, iter, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, dataset.kernel_size))
+            training_report(tb_writer, iter, Ll1.mean(), loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, dataset.kernel_size))
             if (iter in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iter))
                 scene.save(iter)
@@ -332,10 +337,12 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
+
                 psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
+                l1_test /= len(config['cameras'])
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
@@ -353,6 +360,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    up = UncertaintyParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -368,18 +376,17 @@ if __name__ == "__main__":
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
-    # safe_state(args.quiet)
+    safe_state(args.quiet)
 
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
-    
-    # # Start GUI server, configure and run training
-    # network_gui.init(args.ip, args.port)
+
+    # Start GUI server, configure and run training
+    network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    uncertainty_model = UncertaintyModel(op.extract(args)).to(lp.data_device)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, uncertainty_model)
+    training(lp.extract(args), op.extract(args), pp.extract(args), up.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, uncertainty_model)
 
     # All done
     print("\nTraining complete.")

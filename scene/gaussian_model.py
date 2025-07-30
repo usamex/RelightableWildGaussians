@@ -20,6 +20,8 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from scene.uncertainty_model import UncertaintyModel
+from arguments import UncertaintyParams
 from scene.appearance_network import AppearanceNetwork
 from scene.cameras import Camera
 from einops import einsum
@@ -84,14 +86,12 @@ class GaussianModel:
         self.scaling_inverse_activation = torch.log
 
         self.covariance_activation = build_covariance_from_scaling_rotation
-
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
-        
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree : int):
+    def __init__(self, sh_degree : int, uncertainty_config : UncertaintyParams = None):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
@@ -106,6 +106,11 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        if uncertainty_config is not None:
+            self.uncertainty_model = UncertaintyModel(uncertainty_config).to("cuda")
+        else:
+            self.uncertainty_model = None
+
         self.setup_functions()
         # appearance network and appearance embedding
         self.appearance_network = AppearanceNetwork(3+64, 3).cuda()
@@ -127,7 +132,7 @@ class GaussianModel:
             self.xyz_gradient_accum,
             self.denom,
             self.optimizer.state_dict(),
-            self.spatial_lr_scale
+            self.spatial_lr_scale,
         )
 
     def restore(self, model_args, training_args):
@@ -143,6 +148,7 @@ class GaussianModel:
         denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
+
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -356,6 +362,9 @@ class GaussianModel:
             {'params': self.appearance_network.parameters(), 'lr': training_args.appearance_network_lr, "name": "appearance_network"}
         ]
 
+        if self.uncertainty_model is not None:
+            l.append({'params': list(self.uncertainty_model.parameters()), 'lr': training_args.uncertainty_lr, "name": "uncertainty_model"})
+
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
@@ -363,7 +372,7 @@ class GaussianModel:
                                                     max_steps=training_args.position_lr_max_steps)
 
 
-    def update_learning_rate(self, iteration): # SAME
+    def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
@@ -516,7 +525,7 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group["name"] in ["appearance_embeddings", "appearance_network"]:
+            if group["name"] in ["appearance_embeddings", "appearance_network", "uncertainty_model"]:
                 continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -552,7 +561,7 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group["name"] in ["appearance_embeddings", "appearance_network"]:
+            if group["name"] in ["appearance_embeddings", "appearance_network", "uncertainty_model"]:
                 continue
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]

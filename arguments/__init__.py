@@ -10,6 +10,7 @@
 #
 
 from argparse import ArgumentParser, Namespace
+from typing import Optional
 import sys
 import os
 
@@ -104,14 +105,17 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 2000
         self.densify_until_iter = 50_000
         self.densify_grad_threshold = 0.0002
-        # Uncertainty model
+        self.uncertainty_lr = 0.001
+        super().__init__(parser, "Optimization Parameters")
+
+class UncertaintyParams(ParamGroup):
+    def __init__(self, parser):
         self.uncertainty_mode = "dino"
         self.uncertainty_backbone = "dinov2_vits14_reg"
         self.uncertainty_regularizer_weight = 0.5
         self.uncertainty_clip_min = 0.1
         self.uncertainty_mask_clip_max = None
         self.uncertainty_dssim_clip_max = 1.0  # 0.05 -> 0.005
-        self.uncertainty_lr = 0.001
         self.uncertainty_dropout = 0.5
         self.uncertainty_dino_max_size = None
         self.uncertainty_scale_grad = False
@@ -123,7 +127,7 @@ class OptimizationParams(ParamGroup):
         self.uncertainty_warmup_iters = 5000
         self.uncertainty_warmup_start = 35000
 
-        super().__init__(parser, "Optimization Parameters")
+        super().__init__(parser, "Uncertainty Parameters")
 
 
 def get_combined_args(parser : ArgumentParser):
