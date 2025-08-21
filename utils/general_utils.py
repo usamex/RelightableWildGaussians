@@ -15,11 +15,12 @@ from datetime import datetime
 import numpy as np
 import random
 
+
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 
-def PILtoTorch(pil_image, resolution):
-    resized_image_PIL = pil_image.resize(resolution)
+def PILtoTorch(pil_image, resolution, resample = None):
+    resized_image_PIL = pil_image.resize(resolution, resample = resample)
     resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0
     if len(resized_image.shape) == 3:
         return resized_image.permute(2, 0, 1)
@@ -132,9 +133,6 @@ def safe_state(silent):
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
 
-
-
-
 def create_rotation_matrix_from_direction_vector_batch(direction_vectors):
     # Normalize the batch of direction vectors
     direction_vectors = direction_vectors / torch.norm(direction_vectors, dim=-1, keepdim=True)
@@ -152,13 +150,6 @@ def create_rotation_matrix_from_direction_vector_batch(direction_vectors):
     # Create the batch of rotation matrices with the direction vectors as the last columns
     rotation_matrices = torch.stack((v1, v2, direction_vectors), dim=-1)
     return rotation_matrices
-
-# from kornia.geometry import conversions
-# def normal_to_rotation(normals):
-#     rotations = create_rotation_matrix_from_direction_vector_batch(normals)
-#     rotations = conversions.rotation_matrix_to_quaternion(rotations,eps=1e-5, order=conversions.QuaternionCoeffOrder.WXYZ)
-#     return rotations
-
 
 def colormap(img, cmap='jet'):
     import matplotlib.pyplot as plt

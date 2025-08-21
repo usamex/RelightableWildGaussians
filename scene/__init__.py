@@ -8,7 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import glob
 import os
 import random
 import json
@@ -17,6 +17,8 @@ from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+import torch
+# DONE all the same.
 
 class Scene:
 
@@ -40,13 +42,28 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
+        split_file_pattern = os.path.join(args.source_path, "*split.csv")
+        split_files = glob.glob(split_file_pattern)
+
+        if split_files:
+            eval_file = split_files[0]
+            print(f"SPLIT FILE USED: {eval_file}")
+        else:
+            eval_file = None
+            print("WARNING: No split file found. Please check if one exists in the directory or modify scene/init.py.")
+
         if os.path.exists(os.path.join(args.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
+            print("Found sparse folder, assuming Colmap data set!")
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, eval_file)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
+            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, eval_file)
         else:
             assert False, "Could not recognize scene type!"
+
+        if shuffle:
+            random.Random(567464).shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
+            random.Random(774452).shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
 
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
@@ -73,18 +90,30 @@ class Scene:
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
             print("Loading Test Cameras", len(scene_info.test_cameras))
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
-        
+
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
+            if self.gaussians.with_mlp:
+                self.gaussians.mlp.load_state_dict(torch.load(self.model_path + "/chkpnt_mlp" + str(self.loaded_iter) + ".pth", weights_only=True))
+                self.gaussians.embedding.load_state_dict(torch.load(self.model_path + "/chkpnt_embedding" + str(self.loaded_iter) + ".pth", weights_only=True))
+            else:
+                self.gaussians.env_params.load_state_dict(torch.load(self.model_path + "/chkpnt_env" + str(self.loaded_iter) + ".pth", weights_only=True))
+
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+        if self.gaussians.with_mlp:
+            torch.save(self.gaussians.mlp.state_dict(), self.model_path + "/chkpnt_mlp" + str(iteration) + ".pth")
+            torch.save(self.gaussians.embedding.state_dict(), self.model_path + "/chkpnt_embedding" + str(iteration) + ".pth")
+        else:
+            torch.save(self.gaussians.env_params.state_dict(), self.model_path + "/chkpnt_env" + str(iteration) + ".pth")
+
 
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]

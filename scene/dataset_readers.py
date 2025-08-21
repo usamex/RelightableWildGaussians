@@ -11,6 +11,7 @@
 
 import os
 import sys
+import pandas as pd
 from PIL import Image
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
@@ -22,7 +23,8 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
-
+from pathlib import Path
+# DONE with all the same.
 class CameraInfo(NamedTuple):
     uid: int
     R: np.array
@@ -34,6 +36,8 @@ class CameraInfo(NamedTuple):
     image_name: str
     width: int
     height: int
+    mask: np.array
+
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -65,7 +69,8 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius}
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
+def readColmapCameras(cam_extrinsics, cam_intrinsics, path, reading_dir):
+    images_folder=os.path.join(path, reading_dir)
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
@@ -95,11 +100,23 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
-        image_name = os.path.basename(image_path).split(".")[0]
-        image = Image.open(image_path)
+        image_name = os.path.basename(image_path)
+        image = Image.open(image_path) 
+
+        precomputed_mask=True
+        if precomputed_mask:
+            mask_path = Path(images_folder.replace(reading_dir, "masks"))
+            base_image_name = Path(image_name).stem
+            mask_files = list(mask_path.glob(f"{base_image_name}.*"))
+            if mask_files:
+                mask = Image.open(mask_files[0]).convert('L')
+            else:
+                raise FileNotFoundError(f"No mask found for {base_image_name} in {mask_path}")
+        else:
+            mask = Image.fromarray(np.uint8(np.ones_like(image)*255)).convert('L')
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height)
+                              image_path=image_path, image_name=image_name, width=width, height=height, mask=mask)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
@@ -129,7 +146,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, eval, llffhold=8):
+def readColmapSceneInfo(path, images, eval, eval_file, llffhold=20):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -142,12 +159,22 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
     reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, path=path, reading_dir=reading_dir)
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     if eval:
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
-        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+        print("eval: ", eval)
+        print("eval_file: ", eval_file)
+        if eval_file:
+            df = pd.read_csv(eval_file, sep=';', header=0, index_col=0)
+            train_imgs = df[df['split']=='train'].index.tolist()
+            test_imgs = df[df['split']=='test'].index.tolist()
+            train_cam_infos = [c for c in cam_infos if c.image_name in train_imgs]
+            test_cam_infos = [c for c in cam_infos if c.image_name in test_imgs]
+        else:
+            print("No eval file found, using llffhold")
+            train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+            test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
     else:
         train_cam_infos = cam_infos
         test_cam_infos = []
@@ -218,7 +245,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             
     return cam_infos
 
-def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
+def readNerfSyntheticInfo(path, white_background, eval, eval_file, extension=".png"):
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
     print("Reading Test Transforms")
@@ -256,5 +283,5 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
 }

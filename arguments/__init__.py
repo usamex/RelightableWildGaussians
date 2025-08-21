@@ -8,7 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+# DONE but let's see
 from argparse import ArgumentParser, Namespace
 from typing import Optional
 import sys
@@ -47,15 +47,18 @@ class ParamGroup:
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
-        self.sh_degree = 3
+        self.sh_degree = 2
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
-        self._resolution = -1
+        self._resolution = 2
         self._white_background = False
         self.data_device = "cuda"
-        self.eval = False
-        self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
+        self.eval = True
+        self.with_mlp = False
+        self.mlp_W = 64
+        self.mlp_D = 3
+        self.N_a = 24
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -73,27 +76,46 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 200_000
-        self.position_lr_init = 0.000016
-        self.position_lr_final = 0.00000016
+        self.iterations = 40_000
+        self.position_lr_init = 0.00016
+        self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
-        self.position_lr_max_steps = 200_000
-        self.feature_lr = 0.0025
+        self.position_lr_max_steps = 30_000
+        self.feature_lr = 0.002 # for SH_gauss
         self.opacity_lr = 0.05
-        self.scaling_lr = 0.0005
+        self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
-        self.lambda_dist = 0.0
-        self.lambda_normal = 0.05
         self.opacity_cull = 0.05
+        self.lambda_dist = 100
+        self.lambda_normal = 0.05
 
-        self.densification_interval = 400
-        self.opacity_reset_interval = 15_000
-        self.densify_from_iter = 4000
-        self.densify_until_iter = 100_000
+        self.start_shadowed = 20500
+        self.warmup = 20000
+
+        self.start_regularization = 6000
+        self.densification_interval = 500
+        self.opacity_reset_interval = 3000
+        self.densify_from_iter = 500
+        self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
         self.uncertainty_lr = 0.001
+
+        self.env_lr = 0.02
+        self.mlp_lr = 0.002
+        self.mlp_lr_final_ratio = 10.0
+        self.embedding_lr = 0.002
+        self.embedding_lr_final_ratio = 10
+        self.albedo_lr= 0.0025
+
+        # Physical loss weights
+        self.gauss_loss_lambda = 0.001
+        self.env_loss_lambda = 0.05
+        self.consistency_loss_lambda_init = 1.0
+        self.consistency_loss_lambda_final_ratio = 1.0
+        self.shadow_loss_lambda = 10.0
+
         super().__init__(parser, "Optimization Parameters")
 
 class UncertaintyParams(ParamGroup):
@@ -113,8 +135,8 @@ class UncertaintyParams(ParamGroup):
         self.uncertainty_protected_iters: int = 1500
         self.uncertainty_preserve_sky: bool = False
 
-        self.uncertainty_warmup_iters: int = 5_000
-        self.uncertainty_warmup_start: int = 35_000
+        self.uncertainty_warmup_iters: int = 1_800
+        self.uncertainty_warmup_start: int = 10_000
         super().__init__(parser, "Uncertainty Parameters")
 
 

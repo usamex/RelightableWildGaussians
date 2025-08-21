@@ -13,11 +13,11 @@ import torch
 from torch import nn
 import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
-
+# DONE with all the same.
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda"
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", mask = None
                  ):
         super(Camera, self).__init__()
 
@@ -36,7 +36,8 @@ class Camera(nn.Module):
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
 
-        self.original_image = image.clamp(0.0, 1.0) # move to device at dataloader to reduce VRAM requirement
+        self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
+        self.mask = mask.clamp(0.0, 1.0).to(self.data_device)
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
 
@@ -44,7 +45,7 @@ class Camera(nn.Module):
             # self.original_image *= gt_alpha_mask.to(self.data_device)
             self.gt_alpha_mask = gt_alpha_mask.to(self.data_device)
         else:
-            # self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device) # do we need this?
+            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
             self.gt_alpha_mask = None
         
         self.zfar = 100.0
