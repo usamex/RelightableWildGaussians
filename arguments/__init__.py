@@ -56,6 +56,8 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
+        self.init_embeddings = False
+        self.embeddings_dim = 32
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -78,7 +80,6 @@ class OptimizationParams(ParamGroup):
         self.position_lr_final = 0.00000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 200_000
-        self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.0005
         self.rotation_lr = 0.001
@@ -93,7 +94,17 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 4000
         self.densify_until_iter = 100_000
         self.densify_grad_threshold = 0.0002
+        
+        # Uncertainty Parameters
         self.uncertainty_lr = 0.001
+
+        # Relighting Parameters
+        self.embednet_pretrain_epochs = 50
+        self.roughness_lr = 0.0002
+        self.metalness_lr = 0.0002
+        self.albedo_lr = 0.0002
+        self.lambda_envlight = 0.05
+
         super().__init__(parser, "Optimization Parameters")
 
 class UncertaintyParams(ParamGroup):
