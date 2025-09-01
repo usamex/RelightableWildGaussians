@@ -23,7 +23,7 @@
 
 import torch
 from utils.sh_additional_utils import sh_render
-# DONE
+
 
 C0 = 0.28209479177387814
 C1 = 0.4886025119029199
