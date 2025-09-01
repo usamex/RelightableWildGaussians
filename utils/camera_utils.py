@@ -12,9 +12,12 @@
 from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch
-from utils.graphics_utils import fov2focal
+from utils.graphics_utils import fov2focal, getWorld2View2
+import torch
+
 
 WARNED = False
+
 
 def loadCam(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.image.size
@@ -39,18 +42,25 @@ def loadCam(args, id, cam_info, resolution_scale):
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
     if len(cam_info.image.split()) > 3:
-        import torch
         resized_image_rgb = torch.cat([PILtoTorch(im, resolution) for im in cam_info.image.split()[:3]], dim=0)
         loaded_mask = PILtoTorch(cam_info.image.split()[3], resolution)
-        gt_image = resized_image_rgb
     else:
         resized_image_rgb = PILtoTorch(cam_info.image, resolution)
         loaded_mask = None
-        gt_image = resized_image_rgb
+
+    gt_image = resized_image_rgb
+    if cam_info.sky_mask is not None:
+        sky_mask = PILtoTorch(cam_info.sky_mask, resolution)
+    else:
+        sky_mask = None
+    if cam_info.occluders_mask is not None:
+        occluders_mask = PILtoTorch(cam_info.occluders_mask, resolution)
+    else:
+        occluders_mask = None
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
-                  image=gt_image, gt_alpha_mask=loaded_mask,
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, cx=cam_info.cx, cy=cam_info.cy,
+                  image=gt_image, sky_mask=sky_mask, occluders_mask=occluders_mask, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
@@ -82,3 +92,13 @@ def camera_to_JSON(id, camera : Camera):
         'fx' : fov2focal(camera.FovX, camera.width)
     }
     return camera_entry
+
+def get_scene_center(cams_info):
+        cam_centers = []
+        for cam in cams_info:
+            W2C = getWorld2View2(cam.R, cam.T)
+            C2W = np.linalg.inv(W2C)
+            cam_centers.append(C2W[:3, 3:4])
+        cam_centers = np.hstack(cam_centers)
+        avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
+        return avg_cam_center

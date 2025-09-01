@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import numpy as np
 
+
 def mse(img1, img2):
     return (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
 
