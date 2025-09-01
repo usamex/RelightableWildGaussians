@@ -22,6 +22,8 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+import pandas as pd
+
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -29,11 +31,15 @@ class CameraInfo(NamedTuple):
     T: np.array
     FovY: np.array
     FovX: np.array
+    cx: np.array
+    cy: np.array
     image: np.array
     image_path: str
     image_name: str
     width: int
     height: int
+    sky_mask: np.array
+    occluders_mask: np.array
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -65,7 +71,7 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius}
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
+def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, sky_masks_folder, sky_mask_extension, masks_extension, occluders_masks_folder):
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
@@ -96,10 +102,20 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
+        sky_mask_path = os.path.join(sky_masks_folder, image_name + sky_mask_extension)
+        occluders_mask_path = os.path.join(occluders_masks_folder, image_name+ masks_extension)
         image = Image.open(image_path)
+        if os.path.exists(sky_mask_path):
+            sky_mask = Image.open(sky_mask_path).convert("L")
+        else:
+            sky_mask = None
+        if os.path.exists(occluders_mask_path):
+            occluders_mask = Image.open(occluders_mask_path).convert("L")
+        else:
+            occluders_mask = None
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height)
+                              image_path=image_path, image_name=image_name, width=width, height=height, sky_mask=sky_mask, occluders_mask=occluders_mask)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
@@ -129,7 +145,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, eval, llffhold=8):
+def readColmapSceneInfo(path, images, eval, llffhold=8, eval_file=None):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -142,12 +158,24 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
     reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir),
+                                           sky_masks_folder=os.path.join(path, "sky_masks"), sky_mask_extension=".png", masks_extension=".png",
+                                           occluders_masks_folder = os.path.join(path, "masks"))
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     if eval:
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
-        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+        print("eval_file: ", eval_file)
+        if eval_file:
+            df = pd.read_csv(eval_file, sep=';', header=0, index_col=0)
+            train_imgs = df[df['split']=='train'].index.tolist()
+            test_imgs = df[df['split']=='test'].index.tolist()
+
+            train_cam_infos = [c for c in cam_infos if c.image_name in train_imgs]
+            test_cam_infos = [c for c in cam_infos if c.image_name in test_imgs]
+        else:
+            print("No eval file, using llffhold:", llffhold)
+            train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+            test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
     else:
         train_cam_infos = cam_infos
         test_cam_infos = []
