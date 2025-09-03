@@ -16,9 +16,10 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.point_utils import depth_to_normal
 from scene.NVDIFFREC.light import EnvironmentLight
+from utils.normal_utils import compute_normal_world_space
 
-
-# TODO: Add the multiplier to the codebase!!
+# Technically DONE, probably it will fail while running but all good.
+# Multiplier is a tensor that indicates which gaussians are flipped and which are not. (Check lumigauss)
 
 def get_shaded_colors(envlight: EnvironmentLight, pos: torch.tensor, view_pos: torch.tensor, normal: torch.tensor=None, albedo: torch.tensor=None, 
                        roughness:torch.tensor=None, metalness:torch.tensor=None, specular:bool=True):
@@ -29,13 +30,13 @@ def get_shaded_colors(envlight: EnvironmentLight, pos: torch.tensor, view_pos: t
     return colors_precomp, brdf_pkg
 
 
-def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky_sh: torch.tensor, sky_sh_degree: int, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, specular=True, fix_sky=False):
+def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky_sh: torch.tensor, sky_sh_degree: int, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, debug=True, specular=True, fix_sky=False):
     """
     Render the scene. 
     
     Background tensor (bg_color) must be on GPU!
     """
- 
+
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
@@ -89,20 +90,19 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
     else:
         scales = pc.get_scaling
         rotations = pc.get_rotation
-    
+
     sky_mask = viewpoint_camera.sky_mask.cuda().squeeze()
     sky_gaussians_mask = pc.get_is_sky.squeeze() # (N)
     positions = pc.get_xyz # (N, 3)
     albedo = pc.get_albedo # (N, 3)
     roughness = pc.get_roughness # (N, 1)
     metalness = pc.get_metalness # (N,1)
-    colors_precomp, diffuse_color, specular_color, sky_color = (torch.zeros(positions.shape[0], 3, dtype=torch.float32, device="cuda") for _ in range(4))
-
     view_pos = viewpoint_camera.camera_center.repeat(pc.get_opacity.shape[0], 1) # (N, 3)
     dir_pp = (pc.get_xyz - view_pos) # Vector from camera center to each gaussian (N, 3)
     dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True) # Unit vectors pointing from camera to each gaussian (N, 3)
 
     normal, multiplier = compute_normal_world_space(rotations, scales, viewpoint_camera.world_view_transform, positions) # TODO add the multiplier to the codebase!!
+    colors_precomp, diffuse_color, specular_color, sky_color = (torch.zeros(positions.shape[0], 3, dtype=torch.float32, device="cuda") for _ in range(4))
 
     # Compute color for the foreground Gaussians
     color_fg_gaussians, brdf_pkg = get_shaded_colors(envlight=envlight, pos=positions[~sky_gaussians_mask],
@@ -138,9 +138,8 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
         opacities = opacity,
         scales = scales,
         rotations = rotations,
-        cov3D_precomp = cov3D_precomp
-    )
-    
+        cov3D_precomp = cov3D_precomp)
+
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     rets =  {"render": rendered_image,
@@ -148,7 +147,6 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
             "visibility_filter" : radii > 0,
             "radii": radii,
     }
-
 
     # additional regularizations
     render_alpha = allmap[1:2]

@@ -61,6 +61,12 @@ class ModelParams(ParamGroup):
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
         self.init_embeddings = False
         self.embeddings_dim = 32
+
+        self.specular = True
+        self.fix_sky = False
+        self.envlight_sh_degree = 4
+        self.sky_sh_degree = 1
+        self.init_sh_mlp = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

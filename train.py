@@ -10,9 +10,10 @@
 #
 
 import os
+import json
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, depth_loss_gaussians, envl_sh_loss
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -34,15 +35,22 @@ def scale_grads(values, scale):
     rest_values = values.detach() * (1 - scale)
     return grad_values + rest_values
 
-def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
+def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, uncertainty_opt: UncertaintyParams, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, uncertainty_config=uncertainty_opt)
+    gaussians = GaussianModel(uncertainty_config=uncertainty_opt)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+        checkpoint_dir = os.path.dirname(checkpoint)
+        if gaussians.with_mlp:
+            gaussians.mlp.load_state_dict(torch.load(os.path.join(checkpoint_dir, "chkpnt_mlp" + str(first_iter) + ".pth")))
+            gaussians.embedding.load_state_dict(torch.load(os.path.join(checkpoint_dir, "chkpnt_embedding" + str(first_iter) + ".pth")))
+        else:
+            gaussians.env_params.load_state_dict(torch.load(os.path.join(checkpoint_dir, "chkpnt_env" + str(first_iter) + ".pth")))
+        gaussians.optimizer_env.load_state_dict(torch.load(os.path.join(checkpoint_dir, "chkpnt_optimizer_env" + str(first_iter) + ".pth")))
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -51,10 +59,25 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
     iter_end = torch.cuda.Event(enable_timing = True)
 
     viewpoint_stack = None
-    ema_loss_for_log = 0.0
-    ema_dist_for_log = 0.0
-    ema_normal_for_log = 0.0
-    ema_uncertainty_for_log = 0.0
+    ema_logs = {
+        "base_loss": 0.0,
+        "total_loss": 0.0,
+        "distortion_loss": 0.0,
+        "normal_loss": 0.0,
+        "uncertainty_loss": 0.0,
+        "sky_loss": 0.0,
+        "envlight_loss": 0.0,
+        "depth_loss": 0.0,
+        "points": 0.0
+    }
+
+
+    # Prepare a look up table for the appearance embedding
+    appearance_lut = {}
+    for i, s in enumerate(scene.getTrainCameras().copy()):
+        appearance_lut[s.image_name] = i
+    with open(os.path.join(scene.model_path, "appearance_lut.json"), "w") as outfile: 
+        json.dump(appearance_lut, outfile)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -65,8 +88,8 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
         gaussians.update_learning_rate(iteration)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
-        if iteration % 1000 == 0:
-            gaussians.oneupSHdegree()
+        # if iteration % 1000 == 0:
+        #     gaussians.oneupSHdegree()
 
         # Pick a random Camera
         if not viewpoint_stack:
@@ -74,10 +97,27 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
         viewpoint_cam_id = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         viewpoint_cam = scene.getTrainCameras()[viewpoint_cam_id]
         
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-
         gt_image = viewpoint_cam.original_image.to("cuda")
+        sky_mask = viewpoint_cam.sky_mask.expand_as(gt_image).to("cuda")
+        occluders_mask = viewpoint_cam.occluders_mask.expand_as(gt_image).to("cuda")
+
+        # Get SH coefficients of environment lighting for current training image
+        emb_idx = appearance_lut[viewpoint_cam.image_name]
+        envlight_sh, sky_sh = gaussians.compute_env_sh(emb_idx)
+        envlight_sh_rand_noise = torch.randn_like(envlight_sh)*0.025 # Adding random noise to the environment lighting SH coefficients just like in NerfOSR
+        # Get environment lighting object for the current training image
+        gaussians.envlight.set_base(envlight_sh + envlight_sh_rand_noise)
+
+        # Apply mask
+        if sky_mask is not None:
+            print(f"sky_mask.shape={sky_mask.shape}, image.shape={image.shape}")
+            image = scale_grads(image, sky_mask)
+            image_toned = scale_grads(image_toned, sky_mask)
+
+        render_pkg = render(viewpoint_cam, gaussians, pipe, background, debug=False, fix_sky=dataset.fix_sky, specular=dataset.specular)
+        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        diff_col, spec_col = render_pkg["diffuse_color"], render_pkg["specular_color"]
+
         # Uncertainty computation
         uncertainty_loss = 0
         uncertainty_metrics = {}
@@ -109,13 +149,14 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
                 loss_mult = 1
         
         # Compute losses with uncertainty weighting
-        Ll1 = torch.nn.functional.l1_loss(image, gt_image, reduction='none')
+        Ll1 = l1_loss(image, gt_image)
         ssim_value = ssim(image, gt_image, size_average=False)
         
         # Apply loss multipliers for uncertainty weighting
         base_loss = (1.0 - opt.lambda_dssim) * (Ll1 * loss_mult).mean() + opt.lambda_dssim * ((1.0 - ssim_value) * loss_mult).mean()
-        
-        # regularization
+        sky_loss = opt.lambda_sky_brdf * (l1_loss(diff_col, torch.zeros_like(diff_col), mask=sky_mask) + l1_loss(spec_col, torch.zeros_like(spec_col), mask=sky_mask))
+
+        # regularization DO NOT TOUCH
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
         lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
 
@@ -125,6 +166,19 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
+
+        # Envlight regularization
+        envl_loss = envl_sh_loss(envlight_sh, dataset.envlight_sh_degree)
+
+        depth_loss_sky_gauss = 0
+        # Depth regularization
+        if iteration > opt.reg_sky_gauss_depth_from_iter and opt.lambda_sky_gauss > 0:
+            sky_gaussians_mask = gaussians.get_is_sky.squeeze()
+            gaussians_depth = gaussians.get_depth(viewpoint_cam)
+            sky_gaussians_depth = gaussians_depth[(sky_gaussians_mask) & (visibility_filter)]
+            avg_depth_sky_gauss = torch.mean(sky_gaussians_depth)
+            avg_depth_non_sky_gauss = torch.mean(gaussians_depth[(~sky_gaussians_mask) & (visibility_filter)]).detach()
+            depth_loss_sky_gauss = opt.lambda_sky_gauss * depth_loss_gaussians(avg_depth_sky_gauss, avg_depth_non_sky_gauss)
 
         # Detach uncertainty loss if in protected iterations after opacity reset
         if gaussians.uncertainty_model is not None:
@@ -137,7 +191,7 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
                     pass
 
         # Total loss with uncertainty
-        total_loss = base_loss + dist_loss + normal_loss + uncertainty_loss
+        total_loss = base_loss + dist_loss + normal_loss + uncertainty_loss + sky_loss + envl_loss + depth_loss_sky_gauss
         
         total_loss.backward()
 
@@ -145,19 +199,27 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
 
         with torch.no_grad():
             # Progress bar
-            ema_loss_for_log = 0.4 * base_loss.item() + 0.6 * ema_loss_for_log
-            ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
-            ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
+            ema_logs["base_loss"] = 0.4 * base_loss.item() + 0.6 * ema_logs["base_loss"]
+            ema_logs["distortion_loss"] = 0.4 * dist_loss.item() + 0.6 * ema_logs["distortion_loss"]
+            ema_logs["normal_loss"] = 0.4 * normal_loss.item() + 0.6 * ema_logs["normal_loss"]
             if isinstance(uncertainty_loss, torch.Tensor):
-                ema_uncertainty_for_log = 0.4 * uncertainty_loss.item() + 0.6 * ema_uncertainty_for_log
+                ema_logs["uncertainty_loss"] = 0.4 * uncertainty_loss.item() + 0.6 * ema_logs["uncertainty_loss"]
 
+            ema_logs["total_loss"] = 0.4 * total_loss.item() + 0.6 * ema_logs["total_loss"]
+            ema_logs["sky_loss"] = 0.4 * sky_loss.item() + 0.6 * ema_logs["sky_loss"]
+            ema_logs["envlight_loss"] = 0.4 * envl_loss.item() + 0.6 * ema_logs["envlight_loss"]
+            ema_logs["depth_loss"] = 0.4 * depth_loss_sky_gauss.item() + 0.6 * ema_logs["depth_loss"]
 
             if iteration % 10 == 0:
                 loss_dict = {
-                    "Loss": f"{ema_loss_for_log:.{5}f}",
-                    "distort": f"{ema_dist_for_log:.{5}f}",
-                    "normal": f"{ema_normal_for_log:.{5}f}",
-                    "uncertainty": f"{ema_uncertainty_for_log:.{5}f}",
+                    "BaseLoss": f"{ema_logs["base_loss"]:.{5}f}",
+                    "TotalLoss": f"{ema_logs["total_loss"]:.{5}f}",
+                    "Distortion": f"{ema_logs["distortion_loss"]:.{5}f}",
+                    "Normal": f"{ema_logs["normal_loss"]:.{5}f}",
+                    "Uncertainty": f"{ema_logs["uncertainty_loss"]:.{5}f}",
+                    "Sky": f"{ema_logs["sky_loss"]:.{5}f}",
+                    "Envlight": f"{ema_logs["envlight_loss"]:.{5}f}",
+                    "Depth": f"{ema_logs["depth_loss"]:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
                 progress_bar.set_postfix(loss_dict)
@@ -250,7 +312,7 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs): # TODO: Change this
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -304,9 +366,15 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 l1_test /= len(config['cameras'])
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 if tb_writer:
+
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
 
+        if tb_writer:
+            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+            tb_writer.add_histogram("scene/roughness_histogram", scene.gaussians.get_roughness, iteration)
+            tb_writer.add_histogram("scene/metalness_histogram", scene.gaussians.get_metalness, iteration)
+            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
@@ -321,10 +389,17 @@ if __name__ == "__main__":
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 10_000, 20_000, 30_000, 50_000, 70_000, 80_000, 90_000, 110_000, 130_000, 150_000, 170_000, 190_000, 200_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 10_000, 20_000, 30_000, 50_000, 70_000, 80_000, 90_000, 110_000, 130_000, 150_000, 170_000, 190_000, 200_000])
-
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+
+    parser.add_argument("--lambda_sky_gauss", type=float, default=0.05)
+    parser.add_argument("--reg_normal_from_iter", type=float, default=15_000)
+    parser.add_argument("--reg_sky_gauss_depth_from_iter", type=float, default=0)
+    parser.add_argument("--lambda_envlight", type=float, default=100)
+    parser.add_argument("--init_embeddings", action="store_true")
+    parser.add_argument("--init_sh_mlp", action="store_true")
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
