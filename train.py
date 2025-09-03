@@ -40,6 +40,8 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(uncertainty_config=uncertainty_opt)
     scene = Scene(dataset, gaussians)
+    if opt.init_sh_mlp:
+        gaussians.initialize_sh_mlp()
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -110,11 +112,10 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
 
         # Apply mask
         if sky_mask is not None:
-            print(f"sky_mask.shape={sky_mask.shape}, image.shape={image.shape}")
             image = scale_grads(image, sky_mask)
             image_toned = scale_grads(image_toned, sky_mask)
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background, debug=False, fix_sky=dataset.fix_sky, specular=dataset.specular)
+        render_pkg = render(viewpoint_cam, gaussians, gaussians.envlight, sky_sh, dataset.sky_sh_degree, pipe, background, debug=False, fix_sky=dataset.fix_sky, specular=dataset.specular)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         diff_col, spec_col = render_pkg["diffuse_color"], render_pkg["specular_color"]
 
@@ -230,10 +231,10 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
 
             # Log and save
             if tb_writer is not None:
-                tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/dist_loss', ema_logs["distortion_loss"], iteration)
+                tb_writer.add_scalar('train_loss_patches/normal_loss', ema_logs["normal_loss"], iteration)
                 if isinstance(uncertainty_loss, torch.Tensor):
-                    tb_writer.add_scalar('train_loss_patches/uncertainty_loss', ema_uncertainty_for_log, iteration)
+                    tb_writer.add_scalar('train_loss_patches/uncertainty_loss', ema_logs["uncertainty_loss"], iteration)
                     # Log uncertainty metrics
                     for key, value in uncertainty_metrics.items():
                         tb_writer.add_scalar(f'uncertainty_metrics/{key}', value, iteration)
@@ -278,7 +279,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
                         net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
                     metrics_dict = {
                         "#": gaussians.get_opacity.shape[0],
-                        "loss": ema_loss_for_log
+                        "loss": ema_logs["total_loss"]
                         # Add more metrics as needed
                     }
                     # Send the data
