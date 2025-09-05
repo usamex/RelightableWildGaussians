@@ -26,15 +26,11 @@ SOFTWARE.
 Utility functions
 '''
 
-import os
 import numpy as np
 import math
-import argparse
-import imageio.v3 as im
 import cv2 # resize images with float support
 from scipy import ndimage # gaussian blur
 import skimage.measure # max_pooling with block_reduce
-import time
 import utils.spherical_harmonics as  sh
 
 

@@ -24,11 +24,13 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import build_scaling_rotation, sample_points_on_unit_hemisphere
 from scene.uncertainty_model import UncertaintyModel
 from arguments import UncertaintyParams
-
+from arguments import ModelParams
+from scene.net_models import MLPNet
+from scene.NVDIFFREC import EnvironmentLight
 
 class GaussianModel:
 
-    def setup_functions(self):
+    def setup_functions(self, model_config : ModelParams, length_train_cameras : int):
 
         def build_covariance_from_scaling_rotation(center, scaling, scaling_modifier, rotation): # This is because of 2D Gaussians
             RS = build_scaling_rotation(torch.cat([scaling * scaling_modifier, torch.ones_like(scaling)], dim=-1), rotation).permute(0,2,1)
@@ -46,8 +48,10 @@ class GaussianModel:
         self.inverse_opacity_activation = inverse_sigmoid
         self.rotation_activation = torch.nn.functional.normalize
 
+        if self.with_mlp:
+            self.setup_mlp(model_config, length_train_cameras)
 
-    def __init__(self, uncertainty_config : UncertaintyParams = None):
+    def __init__(self, uncertainty_config : UncertaintyParams = None, model_config : ModelParams = None, length_train_cameras : int = 0):
         self._xyz = torch.empty(0)
         self._albedo = torch.empty(0)
         self._scaling = torch.empty(0)
@@ -73,40 +77,56 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self.with_mlp = model_config.with_mlp
         if uncertainty_config is not None:
             self.uncertainty_model = UncertaintyModel(uncertainty_config).to("cuda")
         else:
             self.uncertainty_model = None
 
-        self.setup_functions()
+        self.envlight = EnvironmentLight(base = torch.empty(((model_config.envlight_sh_degree +1)**2), 3),
+                                            sh_degree=model_config.envlight_sh_degree)
+        self.setup_functions(model_config, length_train_cameras)
+
+    def setup_mlp(self, model_config : ModelParams, length_train_cameras : int):
+        print("Setting up MLP")
+        self.mlp: MLPNet = MLPNet(sh_degree_envlight=model_config.envlight_sh_degree, sh_degree_sky=model_config.sky_sh_degree, embedding_dim=model_config.embeddings_dim).cuda()
+        self.embedding = torch.nn.Embedding(length_train_cameras, model_config.embeddings_dim).cuda()
 
     def capture(self):
         return (
-            self.active_sh_degree,
             self._xyz,
-            self._features_dc,
-            self._features_rest,
+            self._albedo,
             self._scaling,
             self._rotation,
             self._opacity,
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
+            self._is_sky,
+            self._sky_radius,
+            self._sky_gauss_center,
+            self._sky_angles,
+            self._metalness,
+            self._roughness,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
+        (self._xyz, 
+        self._albedo,
         self._scaling, 
         self._rotation, 
         self._opacity,
         self.max_radii2D, 
         xyz_gradient_accum, 
         denom,
+        self._is_sky,
+        self._sky_radius,
+        self._sky_gauss_center,
+        self._sky_angles,
+        self._metalness,
+        self._roughness,
         opt_dict, 
         self.spatial_lr_scale) = model_args
 
@@ -181,6 +201,14 @@ class GaussianModel:
     def get_is_sky(self):
         return self._is_sky
 
+    def compute_embedding(self, emb_idx):
+        return self.embedding(torch.full((1,),emb_idx).cuda())
+
+    def compute_env_sh(self, emb_idx):
+        if self.with_mlp:
+            return self.mlp(self.compute_embedding(emb_idx))
+        else:
+            raise NotImplementedError("Computing Environment Lighting without MLP is not implemented")
 
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
         self.spatial_lr_scale = spatial_lr_scale
@@ -272,6 +300,7 @@ class GaussianModel:
             {'params': [self._metalness], 'lr': training_args.metalness_lr, "name": "metalness"},
             {'params': [self._sky_radius], 'lr': training_args.sky_radius_lr, "name": "sky_radius"},
             {'params': [self._sky_angles], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "sky_angles"},
+
         ]
 
         if self.uncertainty_model is not None:
@@ -282,6 +311,14 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
+
+        l_env = [
+            {'params': [*self.embedding.parameters()], 'lr': training_args.embedding_lr, "name": "embeddings"},
+            {'params': [*self.mlp.parameters()], 'lr': training_args.mlp_lr, "name": "mlp"},
+        ]
+        self.optimizer_env = torch.optim.Adam(l_env, lr=0.0, eps=1e-15) # TODO: Try it with only one optimizer
+        print('Env optimizer has parameters: ', [p["name"] for p in self.optimizer_env.param_groups])
+
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''

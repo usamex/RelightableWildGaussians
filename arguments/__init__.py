@@ -61,6 +61,7 @@ class ModelParams(ParamGroup):
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
         self.init_embeddings = False
         self.embeddings_dim = 32
+        self.with_mlp = True
 
         self.specular = True
         self.fix_sky = False
@@ -113,6 +114,15 @@ class OptimizationParams(ParamGroup):
         self.metalness_lr = 0.0002
         self.albedo_lr = 0.0002
         self.lambda_envlight = 0.05
+        self.mlp_lr = 0.0002
+
+        # Sky Parameters
+        self.lambda_sky_gauss = 0.05
+        self.reg_sky_gauss_depth_from_iter = 0
+        self.sky_radius_lr = 0.0001
+        self.embedding_lr = 0.0002
+        self.lambda_sky_brdf = 0.5
+
 
         super().__init__(parser, "Optimization Parameters")
 

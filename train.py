@@ -38,11 +38,11 @@ def scale_grads(values, scale):
 def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams, uncertainty_opt: UncertaintyParams, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(uncertainty_config=uncertainty_opt)
+    gaussians = GaussianModel(uncertainty_config=uncertainty_opt, model_config=dataset, length_train_cameras=397)
     scene = Scene(dataset, gaussians)
-    if opt.init_sh_mlp:
-        gaussians.initialize_sh_mlp()
+
     gaussians.training_setup(opt)
+
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -69,7 +69,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
         "uncertainty_loss": 0.0,
         "sky_loss": 0.0,
         "envlight_loss": 0.0,
-        "depth_loss": 0.0,
+        # "depth_loss": 0.0,
         "points": 0.0
     }
 
@@ -110,10 +110,9 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
         # Get environment lighting object for the current training image
         gaussians.envlight.set_base(envlight_sh + envlight_sh_rand_noise)
 
-        # Apply mask
-        if sky_mask is not None:
-            image = scale_grads(image, sky_mask)
-            image_toned = scale_grads(image_toned, sky_mask)
+        # Apply mask TODO: I'm not sure if we are doing it correctly
+        # if sky_mask is not None:
+        #     image = scale_grads(image, sky_mask)
 
         render_pkg = render(viewpoint_cam, gaussians, gaussians.envlight, sky_sh, dataset.sky_sh_degree, pipe, background, debug=False, fix_sky=dataset.fix_sky, specular=dataset.specular)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
@@ -155,7 +154,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
         
         # Apply loss multipliers for uncertainty weighting
         base_loss = (1.0 - opt.lambda_dssim) * (Ll1 * loss_mult).mean() + opt.lambda_dssim * ((1.0 - ssim_value) * loss_mult).mean()
-        sky_loss = opt.lambda_sky_brdf * (l1_loss(diff_col, torch.zeros_like(diff_col), mask=sky_mask) + l1_loss(spec_col, torch.zeros_like(spec_col), mask=sky_mask))
+        sky_loss = opt.lambda_sky_brdf * (l1_loss(diff_col, torch.zeros_like(diff_col), mask=(1-sky_mask)) + l1_loss(spec_col, torch.zeros_like(spec_col), mask=(1-sky_mask)))
 
         # regularization DO NOT TOUCH
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
@@ -173,13 +172,13 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
 
         depth_loss_sky_gauss = 0
         # Depth regularization
-        if iteration > opt.reg_sky_gauss_depth_from_iter and opt.lambda_sky_gauss > 0:
-            sky_gaussians_mask = gaussians.get_is_sky.squeeze()
-            gaussians_depth = gaussians.get_depth(viewpoint_cam)
-            sky_gaussians_depth = gaussians_depth[(sky_gaussians_mask) & (visibility_filter)]
-            avg_depth_sky_gauss = torch.mean(sky_gaussians_depth)
-            avg_depth_non_sky_gauss = torch.mean(gaussians_depth[(~sky_gaussians_mask) & (visibility_filter)]).detach()
-            depth_loss_sky_gauss = opt.lambda_sky_gauss * depth_loss_gaussians(avg_depth_sky_gauss, avg_depth_non_sky_gauss)
+        # if iteration > opt.reg_sky_gauss_depth_from_iter and opt.lambda_sky_gauss > 0:
+        #     sky_gaussians_mask = gaussians.get_is_sky.squeeze()
+        #     gaussians_depth = gaussians.get_depth(viewpoint_cam)
+        #     sky_gaussians_depth = gaussians_depth[(sky_gaussians_mask) & (visibility_filter)]
+        #     avg_depth_sky_gauss = torch.mean(sky_gaussians_depth)
+        #     avg_depth_non_sky_gauss = torch.mean(gaussians_depth[(~sky_gaussians_mask) & (visibility_filter)]).detach()
+        #     depth_loss_sky_gauss = opt.lambda_sky_gauss * depth_loss_gaussians(avg_depth_sky_gauss, avg_depth_non_sky_gauss)
 
         # Detach uncertainty loss if in protected iterations after opacity reset
         if gaussians.uncertainty_model is not None:
@@ -192,7 +191,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
                     pass
 
         # Total loss with uncertainty
-        total_loss = base_loss + dist_loss + normal_loss + uncertainty_loss + sky_loss + envl_loss + depth_loss_sky_gauss
+        total_loss = base_loss + dist_loss + normal_loss + uncertainty_loss + sky_loss + envl_loss
         
         total_loss.backward()
 
@@ -209,18 +208,18 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
             ema_logs["total_loss"] = 0.4 * total_loss.item() + 0.6 * ema_logs["total_loss"]
             ema_logs["sky_loss"] = 0.4 * sky_loss.item() + 0.6 * ema_logs["sky_loss"]
             ema_logs["envlight_loss"] = 0.4 * envl_loss.item() + 0.6 * ema_logs["envlight_loss"]
-            ema_logs["depth_loss"] = 0.4 * depth_loss_sky_gauss.item() + 0.6 * ema_logs["depth_loss"]
+            # ema_logs["depth_loss"] = 0.4 * depth_loss_sky_gauss.item() + 0.6 * ema_logs["depth_loss"]
 
             if iteration % 10 == 0:
                 loss_dict = {
-                    "BaseLoss": f"{ema_logs["base_loss"]:.{5}f}",
-                    "TotalLoss": f"{ema_logs["total_loss"]:.{5}f}",
-                    "Distortion": f"{ema_logs["distortion_loss"]:.{5}f}",
-                    "Normal": f"{ema_logs["normal_loss"]:.{5}f}",
-                    "Uncertainty": f"{ema_logs["uncertainty_loss"]:.{5}f}",
-                    "Sky": f"{ema_logs["sky_loss"]:.{5}f}",
-                    "Envlight": f"{ema_logs["envlight_loss"]:.{5}f}",
-                    "Depth": f"{ema_logs["depth_loss"]:.{5}f}",
+                    "BaseLoss": f"{ema_logs['base_loss']:.{5}f}",
+                    "TotalLoss": f"{ema_logs['total_loss']:.{5}f}",
+                    "Distortion": f"{ema_logs['distortion_loss']:.{5}f}",
+                    "Normal": f"{ema_logs['normal_loss']:.{5}f}",
+                    "Uncertainty": f"{ema_logs['uncertainty_loss']:.{5}f}",
+                    "Sky": f"{ema_logs['sky_loss']:.{5}f}",
+                    "Envlight": f"{ema_logs['envlight_loss']:.{5}f}",
+                    # "Depth": f"{ema_logs['depth_loss']:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
                 progress_bar.set_postfix(loss_dict)
@@ -393,13 +392,6 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-
-    parser.add_argument("--lambda_sky_gauss", type=float, default=0.05)
-    parser.add_argument("--reg_normal_from_iter", type=float, default=15_000)
-    parser.add_argument("--reg_sky_gauss_depth_from_iter", type=float, default=0)
-    parser.add_argument("--lambda_envlight", type=float, default=100)
-    parser.add_argument("--init_embeddings", action="store_true")
-    parser.add_argument("--init_sh_mlp", action="store_true")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

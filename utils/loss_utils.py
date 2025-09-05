@@ -23,12 +23,12 @@ TINY_NUMBER = 1e-6
 
 def l1_loss(network_output, gt, mask=None):
     if torch.is_tensor(mask):
-        return ((torch.abs((network_output*mask - gt*mask))).sum()) / (network_output.shape[0]*mask.sum() + 1e-6 )
+        return ((torch.abs((network_output*mask - gt*mask))).sum()) / (network_output.shape[0]*mask.sum() + TINY_NUMBER)
     return torch.abs((network_output - gt)).mean()
 
 def l2_loss(network_output, gt, mask=None):
     if torch.is_tensor(mask):
-        return (((network_output*mask - gt*mask) ** 2).sum()) / (network_output.shape[0]*mask.sum() + 1e-6 )
+        return (((network_output*mask - gt*mask) ** 2).sum()) / (network_output.shape[0]*mask.sum() + TINY_NUMBER )
     return ((network_output - gt) ** 2).mean()
 
 def gaussian(window_size, sigma):

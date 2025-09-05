@@ -57,7 +57,7 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
-        sh_degree=-1, # sh_degree is -1 for envlight (idk why) to not use SHs at all!!
+        sh_degree=-1, # sh_degree is -1 for envlight (idk why) to not use SHs at all!! # TODO: See if it works
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=False,
@@ -103,7 +103,10 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
 
     normal, multiplier = compute_normal_world_space(rotations, scales, viewpoint_camera.world_view_transform, positions) # TODO add the multiplier to the codebase!!
     colors_precomp, diffuse_color, specular_color, sky_color = (torch.zeros(positions.shape[0], 3, dtype=torch.float32, device="cuda") for _ in range(4))
-
+    print("colors_precomp.shape", colors_precomp.shape)
+    print("diffuse_color.shape", diffuse_color.shape)
+    print("specular_color.shape", specular_color.shape)
+    print("sky_color.shape", sky_color.shape)
     # Compute color for the foreground Gaussians
     color_fg_gaussians, brdf_pkg = get_shaded_colors(envlight=envlight, pos=positions[~sky_gaussians_mask],
                                                           view_pos=view_pos[~sky_gaussians_mask], normal=normal[~sky_gaussians_mask],
@@ -188,5 +191,16 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
             'surf_depth': surf_depth,
             'surf_normal': surf_normal,
     })
-
+    for name, color in [("diffuse_color", diffuse_color), ("specular_color", specular_color)]:
+        if color is not None:
+            rets[name] = rasterizer(
+                means3D=means3D,
+                means2D=means2D,
+                shs=None,
+                colors_precomp=color,
+                opacities=opacity,
+                scales=scales,
+                rotations=rotations,
+                cov3D_precomp=cov3D_precomp
+            )[0]
     return rets

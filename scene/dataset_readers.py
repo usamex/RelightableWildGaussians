@@ -95,6 +95,8 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, sky_masks_f
         elif intr.model=="PINHOLE":
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
+            cx = intr.params[-2]
+            cy = intr.params[-1]
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
         else:
@@ -114,7 +116,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, sky_masks_f
         else:
             occluders_mask = None
 
-        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, cx=cx, cy=cy, image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height, sky_mask=sky_mask, occluders_mask=occluders_mask)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')

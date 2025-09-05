@@ -160,6 +160,35 @@ def assert_not_none(value):
         raise ValueError("Value cannot be None")
     return value
 
+def rand_hemisphere_dir(N: torch.Tensor, n: torch.Tensor):
+    """
+    Sample a cosine-weighted random direction on the unit hemisphere oriented around vector n.
+    In case of multiple normal vectors stored in n, N samples are generated for each. The tensor storing 
+    n is expected to have len(n.shape) == 2, where the first dimension refers to the number of input normal 
+    vectors.
+    Args:
+        N: number of samples,
+        n: normal vector of shape L x 3
+    Returns:
+        d (torch.Tensor): sampled cosine weighted direction of shape L x N x 3.
+    """
+    assert len(n.shape) == 2 and n.shape[-1] == 3 , "error: n must have size  L X 3"
+
+    # sample N points on the unit sphere
+    rand = torch.rand(n.shape[0], N, 3).cuda()
+    normals = n.repeat(N, 1 , 1).transpose(0,1)
+    phi = 2*np.pi*rand[...,1] # phi in [0, 2pi), shape N x n.shape[0]
+    d = torch.zeros_like(normals)
+    d[..., 0] = torch.cos(phi) * torch.sqrt(rand[...,0])
+    d[..., 1] = torch.sin(phi) * torch.sqrt(rand[...,0])
+    d[...,2] = torch.sqrt(1- torch.linalg.vector_norm(d, dim = -1)**2)
+    # orient points around corresponding normal vectorſ
+    tangent = torch.nn.functional.normalize(rand, dim=-1)
+    bitangent = torch.linalg.cross(tangent, normals) # cross product along dim=-1
+    d = tangent * d[...,0].unsqueeze(-1) + bitangent * d[...,1].unsqueeze(-1) + normals * d[...,2].unsqueeze(-1) 
+
+    return d
+
 def get_uniform_points_on_sphere_fibonacci(num_points, *, dtype=None, xnp=torch): # TODO: Take a look at this later
     # https://arxiv.org/pdf/0912.4540.pdf
     # Golden angle in radians

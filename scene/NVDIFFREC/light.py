@@ -3,8 +3,6 @@ import numpy as np
 import torch
 import nvdiffrast.torch as dr
 from . import util
-from . import renderutils as ru
-from utils.general_utils import get_homogeneous
 from utils.sh_utils import  eval_sh
 from utils.sh_additional_utils import sh_render
 from utils.sh_utils import gauss_kernel
