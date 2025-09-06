@@ -105,7 +105,8 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, sky_masks_f
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
         sky_mask_path = os.path.join(sky_masks_folder, image_name + sky_mask_extension)
-        occluders_mask_path = os.path.join(occluders_masks_folder, image_name+ masks_extension)
+        occluders_mask_path = os.path.join(occluders_masks_folder, image_name + masks_extension)
+        image_name = os.path.basename(extr.name)
         image = Image.open(image_path)
         if os.path.exists(sky_mask_path):
             sky_mask = Image.open(sky_mask_path).convert("L")
@@ -166,7 +167,6 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, eval_file=None):
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     if eval:
-        print("eval_file: ", eval_file)
         if eval_file:
             df = pd.read_csv(eval_file, sep=';', header=0, index_col=0)
             train_imgs = df[df['split']=='train'].index.tolist()

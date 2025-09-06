@@ -103,10 +103,6 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
 
     normal, multiplier = compute_normal_world_space(rotations, scales, viewpoint_camera.world_view_transform, positions) # TODO add the multiplier to the codebase!!
     colors_precomp, diffuse_color, specular_color, sky_color = (torch.zeros(positions.shape[0], 3, dtype=torch.float32, device="cuda") for _ in range(4))
-    print("colors_precomp.shape", colors_precomp.shape)
-    print("diffuse_color.shape", diffuse_color.shape)
-    print("specular_color.shape", specular_color.shape)
-    print("sky_color.shape", sky_color.shape)
     # Compute color for the foreground Gaussians
     color_fg_gaussians, brdf_pkg = get_shaded_colors(envlight=envlight, pos=positions[~sky_gaussians_mask],
                                                           view_pos=view_pos[~sky_gaussians_mask], normal=normal[~sky_gaussians_mask],
