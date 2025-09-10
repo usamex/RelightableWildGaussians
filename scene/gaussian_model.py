@@ -52,28 +52,28 @@ class GaussianModel:
             self.setup_mlp(model_config, length_train_cameras)
 
     def __init__(self, uncertainty_config : UncertaintyParams = None, model_config : ModelParams = None, length_train_cameras : int = 0):
-        self._xyz = torch.empty(0)
-        self._albedo = torch.empty(0)
-        self._scaling = torch.empty(0)
-        self._rotation = torch.empty(0)
-        self._opacity = torch.empty(0)
-        self.max_radii2D = torch.empty(0)
-        self.xyz_gradient_accum = torch.empty(0)
+        self._xyz = torch.empty(0, device="cuda")
+        self._albedo = torch.empty(0, device="cuda")
+        self._scaling = torch.empty(0, device="cuda")
+        self._rotation = torch.empty(0, device="cuda")
+        self._opacity = torch.empty(0, device="cuda")
+        self.max_radii2D = torch.empty(0, device="cuda")
+        self.xyz_gradient_accum = torch.empty(0, device="cuda")
 
-        self._is_sky = torch.empty(0)
-        self._sky_radius = torch.empty(0)
-        self._sky_gauss_center = torch.empty(0)
-        self._sky_angles = torch.empty(0)
+        self._is_sky = torch.empty(0, device="cuda")
+        self._sky_radius = torch.empty(0, device="cuda")
+        self._sky_gauss_center = torch.empty(0, device="cuda")
+        self._sky_angles = torch.empty(0, device="cuda")
 
-        self._roughness = torch.empty(0)
-        self._metalness = torch.empty(0)
+        self._roughness = torch.empty(0, device="cuda")
+        self._metalness = torch.empty(0, device="cuda")
 
         self.material_properties_activation = torch.sigmoid
         self.default_roughness = 1.0
         self.default_albedo = 1.0
         self.default_metalness = 0.1
 
-        self.denom = torch.empty(0)
+        self.denom = torch.empty(0, device="cuda")
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
@@ -219,7 +219,6 @@ class GaussianModel:
         # features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
-
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
         rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda") # TODO: Should we try random as well?
@@ -251,7 +250,7 @@ class GaussianModel:
         points = points + scene_center
         gmask = torch.zeros((points.shape[0],), dtype=torch.bool, device=points.device)
         for cam in cameras:
-            uv = cam.project(points[torch.logical_not(gmask)])
+            uv = cam.camera_project(points[torch.logical_not(gmask)])
             mask = torch.logical_not(torch.isnan(uv).any(-1))
             # Only top 2/3 of the image
             assert cam.image_width is not None and cam.image_height is not None
@@ -277,7 +276,7 @@ class GaussianModel:
 
 
         dist2 = torch.clamp_min(distCUDA2(sky_xyz.float().cuda()), 0.0000001)
-        sky_scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        sky_scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, self._scaling.shape[1]) # Since it is 2DGS it will be 2
         sky_rots = torch.zeros((sky_xyz.shape[0], 4), device=self._rotation.device)
         sky_rots[:, 0] = 1
         self._rotation = nn.Parameter(torch.cat([self._rotation, sky_rots.requires_grad_(True)], dim=0))
@@ -551,7 +550,9 @@ class GaussianModel:
         "roughness": new_roughness,
         "metalness": new_metalness,
         "sky_angles": new_sky_angles}
-
+        # if new_sky_angles is not None:
+        #     d.update({"sky_angles": new_sky_angles})
+        # print(d)
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
         self._albedo = optimizable_tensors["albedo"]
@@ -560,7 +561,9 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
         self._roughness = optimizable_tensors["roughness"]
         self._metalness = optimizable_tensors["metalness"]
-        self._sky_angles = optimizable_tensors["sky_angles"] # TODO: Take a look at this later
+        # if "sky_angles" in optimizable_tensors.keys():
+        #     self._sky_angles = optimizable_tensors["sky_angles"] # TODO: Take a look at this later
+        self._sky_angles = optimizable_tensors["sky_angles"]
         self._is_sky = torch.cat((self._is_sky, new_is_sky), dim=0)
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")

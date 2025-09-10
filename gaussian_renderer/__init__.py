@@ -187,7 +187,24 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
             'surf_depth': surf_depth,
             'surf_normal': surf_normal,
     })
-    for name, color in [("diffuse_color", diffuse_color), ("specular_color", specular_color)]:
+
+    render_extras = {"diffuse_color": diffuse_color, "specular_color": specular_color}
+
+    if debug:
+        roughness_all = torch.zeros((positions.shape[0], 1), device="cuda", dtype=torch.float32)
+        roughness_all[~sky_gaussians_mask] = roughness
+        metalness_all = torch.zeros((positions.shape[0], 1), device="cuda", dtype=torch.float32)
+        metalness_all[~sky_gaussians_mask] = metalness
+        albedo_all = torch.ones_like(positions)
+        albedo_all[~sky_gaussians_mask] = albedo
+
+        render_extras.update({
+            "sky_color": sky_color,
+            "roughness": roughness_all.repeat(1, 3),
+            "metalness": metalness_all.repeat(1, 3),
+            "albedo": albedo_all})
+
+    for name, color in render_extras.items():
         if color is not None:
             rets[name] = rasterizer(
                 means3D=means3D,

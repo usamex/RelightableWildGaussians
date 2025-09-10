@@ -12,6 +12,7 @@
 import os
 import json
 import torch
+from typing import Callable, Tuple
 from random import randint
 from utils.loss_utils import l1_loss, ssim, depth_loss_gaussians, envl_sh_loss
 from gaussian_renderer import render, network_gui
@@ -22,6 +23,7 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr, render_net_image
 from argparse import ArgumentParser, Namespace
+from utils.sh_utils import render_sh_map
 from arguments import ModelParams, PipelineParams, OptimizationParams, UncertaintyParams
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -238,7 +240,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
                     for key, value in uncertainty_metrics.items():
                         tb_writer.add_scalar(f'uncertainty_metrics/{key}', value, iteration)
 
-            training_report(tb_writer, iteration, Ll1.mean(), base_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            training_report(tb_writer, iteration, Ll1.mean(), base_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), appearance_lut=appearance_lut, source_path=dataset.source_path)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -312,7 +314,7 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs): # TODO: Change this
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc: Callable, renderArgs: Tuple, appearance_lut=None, source_path=None): # TODO: Change this
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -330,9 +332,17 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 l1_test = 0.0
                 psnr_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
-                    render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
+                    emb_idx = appearance_lut[viewpoint.image_name]
+                    envlight_sh, sky_sh = scene.gaussians.compute_env_sh(emb_idx)
+                    scene.gaussians.envlight.set_base(envlight_sh)
+                    render_pkg = renderFunc(viewpoint, scene.gaussians, scene.gaussians.envlight, sky_sh, renderArgs["sky_sh_degree"], renderArgs["pipe"],
+                                                renderArgs["background"], debug=renderArgs["debug"], fix_sky=renderArgs["fix_sky"], specular=renderArgs["specular"])
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    reconstructed_envlight = scene.gaussians.envlight.render_sh().cuda().permute(2,0,1)
+                    reconstructed_sky_map = render_sh_map(sky_sh.squeeze()).cuda().permute(2,0,1)
+                    specular_light = scene.gaussians.envlight.get_specular_light_sh(torch.mean(scene.gaussians.get_roughness).unsqueeze(0))
+                    reconstructed_spec_light = render_sh_map(specular_light.squeeze(), gamma_correct=True).cuda().permute(2,0,1)
                     if tb_writer and (idx < 5):
                         from utils.general_utils import colormap
                         depth = render_pkg["surf_depth"]
@@ -341,6 +351,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         depth = colormap(depth.cpu().numpy()[0], cmap='turbo')
                         tb_writer.add_images(config['name'] + "_view_{}/depth".format(viewpoint.image_name), depth[None], global_step=iteration)
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                        tb_writer.add_images(config['name'] + "_view_{}/reconstructed_envlight".format(viewpoint.image_name), reconstructed_envlight[None], global_step=iteration)
+                        tb_writer.add_images(config['name'] + "_view_{}/reconstructed_sky_map".format(viewpoint.image_name), reconstructed_sky_map[None], global_step=iteration)
+                        tb_writer.add_images(config['name'] + "_view_{}/reconstructed_spec_light".format(viewpoint.image_name), reconstructed_spec_light[None], global_step=iteration)
 
                         try:
                             rend_alpha = render_pkg['rend_alpha']
@@ -353,6 +366,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                             rend_dist = render_pkg["rend_dist"]
                             rend_dist = colormap(rend_dist.cpu().numpy()[0])
                             tb_writer.add_images(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name), rend_dist[None], global_step=iteration)
+                            for k in render_pkg.keys():
+                                if k in ["diffuse_color", "specular_color", "sky_color", "roughness", "metalness", "albedo"]:
+                                    tb_writer.add_images(config['name'] + "_view_{}/{}".format(viewpoint.image_name, k), render_pkg[k][None], global_step=iteration)
                         except:
                             pass
 
@@ -366,7 +382,6 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 l1_test /= len(config['cameras'])
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 if tb_writer:
-
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
 
