@@ -221,7 +221,7 @@ class GaussianModel:
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
-        rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda") # TODO: Should we try random as well?
+        rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda") # TODO: Should we try 0 as well?
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
@@ -603,7 +603,7 @@ class GaussianModel:
         else:
             new_sky_angles = None
 
-        self.densification_postfix(new_xyz, new_albedo, new_opacity, new_scaling, new_rotation,
+        self.densification_postfix(new_xyz[~(new_is_sky.squeeze())], new_albedo, new_opacity, new_scaling, new_rotation,
                                    new_roughness, new_metalness, new_is_sky, new_sky_angles) # TODO: Take a look at this later
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
@@ -617,7 +617,7 @@ class GaussianModel:
 
         selected_fg_pts_mask = selected_pts_mask[~self.get_is_sky.squeeze()]
         selected_sky_pts_mask = selected_pts_mask[self.get_is_sky.squeeze()]
-        new_xyz = self._xyz[selected_pts_mask] # TODO: Take a look at this later
+        new_xyz = self.get_xyz[selected_pts_mask & ~self.get_is_sky.squeeze()] # TODO: Take a look at this later
         new_albedo = self._albedo[selected_fg_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
