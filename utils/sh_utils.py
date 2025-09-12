@@ -99,7 +99,6 @@ def eval_sh_hemisphere(n, env):
     )
     return irradiance
 
-
 def eval_sh_shadowed(shs_gauss, sh_scene):
     """
     Evaluates the dot product for SH coefficients for shadowed rendering.

@@ -81,6 +81,7 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
         viewpoint_cam = scene.getTrainCameras()[viewpoint_cam_id]
 
         gt_image = viewpoint_cam.original_image.to("cuda")
+        mask = viewpoint_cam.mask
 
         # compute env sh for given camera; like NerfOSR - add small random noise for env map
         emb_idx = appearance_lut[viewpoint_cam.image_name]
@@ -104,40 +105,13 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
         lambda_dist = lambdas["lambda_dist"]
 
         # photometric loss for unshadowed
-        # Uncertainty computation
-        uncertainty_loss = 0
-        loss_mult = 1.0
         if unshadowed_image_loss_lambda >0:
             rgb_precomp_unshadowed, _ =gaussians.compute_gaussian_rgb(sh_env+sh_random_noise, shadowed=False, normal_vectors=normal_vectors)
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, override_color=rgb_precomp_unshadowed)
             image_unshadowed = render_pkg["render"]
             viewspace_point_tensor_unshadowed, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]  
-            if gaussians.uncertainty_model is not None:
-                del loss_mult
-                # Compute uncertainty loss and multipliers
-                uncertainty_loss, uncertainty_metrics, loss_mult = gaussians.uncertainty_model.get_loss(
-                    gt_image, 
-                    image_unshadowed.detach(), 
-                    _cache_entry=('train', viewpoint_cam_id)
-                )
-                
-                # Apply uncertainty warmup logic
-                loss_mult = (loss_mult > 1).to(dtype=loss_mult.dtype)
-                
-                if iteration < uncertainty_opt.uncertainty_warmup_start:
-                    loss_mult = 1
-                elif iteration < uncertainty_opt.uncertainty_warmup_start + uncertainty_opt.uncertainty_warmup_iters:
-                    p = (iteration - uncertainty_opt.uncertainty_warmup_start) / uncertainty_opt.uncertainty_warmup_iters
-                    loss_mult = 1 + p * (loss_mult - 1)
-                    
-                if uncertainty_opt.uncertainty_center_mult:
-                    loss_mult = loss_mult.sub(loss_mult.mean() - 1).clamp(0, 2)
-                
-                if uncertainty_opt.uncertainty_scale_grad:
-                    image_unshadowed = scale_grads(image_unshadowed, loss_mult)
-                    loss_mult = 1
-            Ll1_unshadowed = l1_loss(image_unshadowed, gt_image)
-            unshadowed_image_loss = (1.0 - opt.lambda_dssim) * (Ll1_unshadowed * loss_mult).mean() + opt.lambda_dssim * (1.0 - (ssim(image_unshadowed, gt_image) * loss_mult).mean())
+            Ll1_unshadowed = l1_loss(image_unshadowed, gt_image, mask=mask)
+            unshadowed_image_loss = (1.0 - opt.lambda_dssim) * Ll1_unshadowed + opt.lambda_dssim * (1.0 - ssim(image_unshadowed, gt_image, mask=mask))
             unshadowed_image_loss *= unshadowed_image_loss_lambda
         else:
             Ll1_unshadowed = torch.tensor(0)
@@ -149,32 +123,8 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, override_color=rgb_precomp_shadowed)
             image_shadowed = render_pkg["render"] 
             viewspace_point_tensor_shadowed, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            if gaussians.uncertainty_model is not None:
-                del loss_mult
-                # Compute uncertainty loss and multipliers
-                uncertainty_loss, uncertainty_metrics, loss_mult = gaussians.uncertainty_model.get_loss(
-                    gt_image, 
-                    image_shadowed.detach(), 
-                    _cache_entry=('train', viewpoint_cam_id)
-                )
-                
-                # Apply uncertainty warmup logic
-                loss_mult = (loss_mult > 1).to(dtype=loss_mult.dtype)
-                
-                if iteration < uncertainty_opt.uncertainty_warmup_start:
-                    loss_mult = 1
-                elif iteration < uncertainty_opt.uncertainty_warmup_start + uncertainty_opt.uncertainty_warmup_iters:
-                    p = (iteration - uncertainty_opt.uncertainty_warmup_start) / uncertainty_opt.uncertainty_warmup_iters
-                    loss_mult = 1 + p * (loss_mult - 1)
-                    
-                if uncertainty_opt.uncertainty_center_mult:
-                    loss_mult = loss_mult.sub(loss_mult.mean() - 1).clamp(0, 2)
-                
-                if uncertainty_opt.uncertainty_scale_grad:
-                    image_shadowed = scale_grads(image_shadowed, loss_mult)
-                    loss_mult = 1
-            Ll1_shadowed = l1_loss(image_shadowed, gt_image)
-            shadowed_image_loss = (1.0 - opt.lambda_dssim) * (Ll1_shadowed * loss_mult).mean() + opt.lambda_dssim * (1.0 - (ssim(image_shadowed, gt_image) * loss_mult).mean())
+            Ll1_shadowed = l1_loss(image_shadowed, gt_image, mask=mask)
+            shadowed_image_loss = (1.0 - opt.lambda_dssim) * Ll1_shadowed + opt.lambda_dssim * (1.0 - ssim(image_shadowed, gt_image, mask=mask))
             shadowed_image_loss *= shadowed_image_loss_lambda
         else:
             Ll1_shadowed = torch.tensor(0)
@@ -201,26 +151,16 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
 
 
         if lambda_normal>0 or lambda_dist>0:
-            rend_dist = render_pkg["rend_dist"]
-            rend_normal  = render_pkg['rend_normal']
-            surf_normal = render_pkg['surf_normal']
+            rend_dist = render_pkg["rend_dist"] * mask
+            rend_normal  = render_pkg['rend_normal'] * mask
+            surf_normal = render_pkg['surf_normal'] * mask
             normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
             normal_loss = lambda_normal * (normal_error).mean()
             dist_loss = lambda_dist * (rend_dist).mean()
         else:
             normal_loss, dist_loss = torch.tensor(0), torch.tensor(0)
 
-        # Detach uncertainty loss if in protected iterations after opacity reset
-        if gaussians.uncertainty_model is not None:
-            last_densify_iter = min(iteration, opt.densify_until_iter - 1)
-            last_dentify_iter = (last_densify_iter // opt.opacity_reset_interval) * opt.opacity_reset_interval
-            if iteration < last_dentify_iter + uncertainty_opt.uncertainty_protected_iters:
-                try:
-                    uncertainty_loss = uncertainty_loss.detach()
-                except AttributeError:
-                    pass
-
-        total_loss = unshadowed_image_loss + shadowed_image_loss + dist_loss + normal_loss + shadow_loss + sh_gauss_loss + sh_env_loss + consistency_loss + uncertainty_loss
+        total_loss = unshadowed_image_loss + shadowed_image_loss + dist_loss + normal_loss + shadow_loss + sh_gauss_loss + sh_env_loss + consistency_loss
 
         total_loss.backward()
         iter_end.record()
@@ -239,8 +179,6 @@ def training(dataset, opt, pipe, uncertainty_opt, testing_iterations, saving_ite
                     "ShadowLoss": f"{shadow_loss:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
-                if gaussians.uncertainty_model is not None:
-                    loss_dict["UncertaintyLoss"] = f"{uncertainty_loss:.{5}f}"
                 progress_bar.set_postfix(loss_dict)
 
                 progress_bar.update(10)

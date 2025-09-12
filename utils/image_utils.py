@@ -13,7 +13,6 @@ import torch
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import numpy as np
-# DONE with some additional functions
 
 def mse(img1, img2, mask=None):
     if torch.is_tensor(mask):

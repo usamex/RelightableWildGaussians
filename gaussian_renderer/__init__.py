@@ -8,7 +8,6 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-# DONE without gaussian_mask
 import torch
 import math
 from diff_surfel_rasterization import GaussianRasterizationSettings, GaussianRasterizer

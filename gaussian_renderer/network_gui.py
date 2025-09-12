@@ -8,7 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-# DONE will all the same
+
 import torch
 import traceback
 import socket

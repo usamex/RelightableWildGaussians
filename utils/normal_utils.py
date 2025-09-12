@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-# DONE with some TODO s.
 
 def quat_to_rot(q):
     batch_size, _ = q.shape
@@ -51,3 +50,4 @@ def compute_normal_world_space(quaternions, scales, viewmat, points_world):
     tn*=multiplier.unsqueeze(1)
     normal_vectors = tn / (tn.norm(dim=1, keepdim=True)+0.000001)
     return normal_vectors, multiplier
+

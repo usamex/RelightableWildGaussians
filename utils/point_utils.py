@@ -6,7 +6,6 @@ import os, cv2
 import matplotlib.pyplot as plt
 import math
 
-# DONE.
 def depths_to_points(view, depthmap):
     c2w = (view.world_view_transform.T).inverse()
     W, H = view.image_width, view.image_height
