@@ -542,27 +542,28 @@ class GaussianModel:
 
     def densification_postfix(self, new_xyz, new_albedo, new_opacities, new_scaling, new_rotation,
                               new_roughness, new_metalness, new_is_sky, new_sky_angles):
-        d = {"xyz": new_xyz,
-        "albedo": new_albedo,
+        d = {"albedo": new_albedo,
         "opacity": new_opacities,
         "scaling" : new_scaling,
         "rotation" : new_rotation,
         "roughness": new_roughness,
-        "metalness": new_metalness,
-        "sky_angles": new_sky_angles}
-        # if new_sky_angles is not None:
-        #     d.update({"sky_angles": new_sky_angles})
+        "metalness": new_metalness}
+        if new_sky_angles is not None:
+            d.update({"sky_angles": new_sky_angles})
+        if new_xyz is not None:
+            d.update({"xyz": new_xyz})
         # print(d)
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
-        self._xyz = optimizable_tensors["xyz"]
+        if "xyz" in optimizable_tensors.keys():
+            self._xyz = optimizable_tensors["xyz"]
         self._albedo = optimizable_tensors["albedo"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._roughness = optimizable_tensors["roughness"]
         self._metalness = optimizable_tensors["metalness"]
-        # if "sky_angles" in optimizable_tensors.keys():
-        #     self._sky_angles = optimizable_tensors["sky_angles"] # TODO: Take a look at this later
+        if "sky_angles" in optimizable_tensors.keys():
+            self._sky_angles = optimizable_tensors["sky_angles"] # TODO: Take a look at this later
         self._sky_angles = optimizable_tensors["sky_angles"]
         self._is_sky = torch.cat((self._is_sky, new_is_sky), dim=0)
 

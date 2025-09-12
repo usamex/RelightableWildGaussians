@@ -27,8 +27,10 @@ from utils.sh_utils import render_sh_map
 from arguments import ModelParams, PipelineParams, OptimizationParams, UncertaintyParams
 try:
     from torch.utils.tensorboard import SummaryWriter
+    print("Tensorboard found")
     TENSORBOARD_FOUND = True
 except ImportError:
+    print("Tensorboard not found")
     TENSORBOARD_FOUND = False
 
 def scale_grads(values, scale):
@@ -116,7 +118,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
         # if sky_mask is not None:
         #     image = scale_grads(image, sky_mask)
 
-        render_pkg = render(viewpoint_cam, gaussians, gaussians.envlight, sky_sh, dataset.sky_sh_degree, pipe, background, debug=False, fix_sky=dataset.fix_sky, specular=dataset.specular)
+        render_pkg = render(viewpoint_cam, gaussians, gaussians.envlight, sky_sh, dataset.sky_sh_degree, pipe, background, debug=False, fix_sky=dataset.fix_sky, specular=False)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         diff_col, spec_col = render_pkg["diffuse_color"], render_pkg["specular_color"]
 
@@ -240,7 +242,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
                     for key, value in uncertainty_metrics.items():
                         tb_writer.add_scalar(f'uncertainty_metrics/{key}', value, iteration)
 
-            training_report(tb_writer, iteration, Ll1.mean(), base_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), appearance_lut=appearance_lut, source_path=dataset.source_path)
+            training_report(tb_writer, iteration, Ll1.mean(), base_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, renderArgs={"sky_sh_degree": dataset.sky_sh_degree, "pipe": pipe, "background": background, "debug": True, "fix_sky": dataset.fix_sky, "specular": dataset.specular}, appearance_lut=appearance_lut, source_path=dataset.source_path)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -314,7 +316,7 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc: Callable, renderArgs: Tuple, appearance_lut=None, source_path=None): # TODO: Change this
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc: Callable, renderArgs: dict, appearance_lut=None, source_path=None): # TODO: Change this
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -324,19 +326,19 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     # Report test and samples of training set
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+        validation_configs = ({'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]},) # {'name': 'test', 'cameras' : scene.getTestCameras()}, 
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
-                    emb_idx = appearance_lut[viewpoint.image_name]
+                    image_name = viewpoint.image_name.split(".")[0] + "." + viewpoint.image_name.split(".")[1].lower()
+                    emb_idx = appearance_lut[image_name]
                     envlight_sh, sky_sh = scene.gaussians.compute_env_sh(emb_idx)
                     scene.gaussians.envlight.set_base(envlight_sh)
                     render_pkg = renderFunc(viewpoint, scene.gaussians, scene.gaussians.envlight, sky_sh, renderArgs["sky_sh_degree"], renderArgs["pipe"],
-                                                renderArgs["background"], debug=renderArgs["debug"], fix_sky=renderArgs["fix_sky"], specular=renderArgs["specular"])
+                                                renderArgs["background"], debug=renderArgs["debug"], fix_sky=renderArgs["fix_sky"], specular=False)
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     reconstructed_envlight = scene.gaussians.envlight.render_sh().cuda().permute(2,0,1)

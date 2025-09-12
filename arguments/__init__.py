@@ -63,7 +63,7 @@ class ModelParams(ParamGroup):
         self.embeddings_dim = 32
         self.with_mlp = True
 
-        self.specular = True
+        self.specular = False
         self.fix_sky = False
         self.envlight_sh_degree = 4
         self.sky_sh_degree = 1
