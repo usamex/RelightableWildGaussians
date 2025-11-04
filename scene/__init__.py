@@ -12,6 +12,7 @@
 import os
 import random
 import json
+from pathlib import Path
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -41,7 +42,15 @@ class Scene:
         self.test_cameras = {}
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
+            source_path = Path(args.source_path)
+            split_files = list(source_path.glob("*split.csv"))
+            if split_files:
+                split_file = split_files[0]
+                print(f"Split file is used: {split_file}")
+            else:
+                print("WARNING: No split file found. Please check if one exists in the directory or modify scene/init.py.")
+                split_file = None
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, eval_file=split_file)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
@@ -81,6 +90,7 @@ class Scene:
                                                            "point_cloud.ply"))
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            self.gaussians.augment_with_sky_gaussians(self.getTrainCameras().copy())
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))

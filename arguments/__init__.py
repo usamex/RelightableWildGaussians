@@ -14,8 +14,10 @@ from typing import Optional
 import sys
 import os
 
+
 class GroupParams:
     pass
+
 
 class ParamGroup:
     def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
@@ -45,7 +47,8 @@ class ParamGroup:
                 setattr(group, arg[0], arg[1])
         return group
 
-class ModelParams(ParamGroup): 
+
+class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
         self._source_path = ""
@@ -54,8 +57,17 @@ class ModelParams(ParamGroup):
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
-        self.eval = False
+        self.eval = True
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
+        self.init_embeddings = False
+        self.embeddings_dim = 32
+        self.with_mlp = True
+
+        self.specular = False
+        self.fix_sky = False
+        self.envlight_sh_degree = 4
+        self.sky_sh_degree = 1
+        self.init_sh_mlp = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -68,7 +80,7 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.depth_ratio = 0.0
-        self.debug = False
+        self.debug = True
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
@@ -78,7 +90,6 @@ class OptimizationParams(ParamGroup):
         self.position_lr_final = 0.00000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 200_000
-        self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.0005
         self.rotation_lr = 0.001
@@ -93,7 +104,26 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 4000
         self.densify_until_iter = 100_000
         self.densify_grad_threshold = 0.0002
+        
+        # Uncertainty Parameters
         self.uncertainty_lr = 0.001
+
+        # Relighting Parameters
+        self.embednet_pretrain_epochs = 50
+        self.roughness_lr = 0.0002
+        self.metalness_lr = 0.0002
+        self.albedo_lr = 0.0002
+        self.lambda_envlight = 0.05
+        self.mlp_lr = 0.0002
+
+        # Sky Parameters
+        self.lambda_sky_gauss = 0.05
+        self.reg_sky_gauss_depth_from_iter = 0
+        self.sky_radius_lr = 0.0001
+        self.embedding_lr = 0.0002
+        self.lambda_sky_brdf = 0.5
+
+
         super().__init__(parser, "Optimization Parameters")
 
 class UncertaintyParams(ParamGroup):

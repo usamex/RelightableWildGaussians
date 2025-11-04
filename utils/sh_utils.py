@@ -22,6 +22,8 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 
 import torch
+from utils.sh_additional_utils import sh_render
+
 
 C0 = 0.28209479177387814
 C1 = 0.4886025119029199
@@ -51,7 +53,20 @@ C4 = [
     0.47308734787878004,
     -1.7701307697799304,
     0.6258357354491761,
-]   
+]
+C5 = [
+    -0.6563820568401703, 
+    8.302649259524165,
+    -0.48923829943525043, 
+    4.793536784973324,
+    -0.452946651195697,
+    0.1169503224534236,
+    -0.452946651195697,
+    2.3967683924866,
+    -0.48923829943525043,
+    2.075662314881041, 
+    -0.6563820568401701
+]
 
 
 def eval_sh(deg, sh, dirs):
@@ -60,14 +75,15 @@ def eval_sh(deg, sh, dirs):
     using hardcoded SH polynomials.
     Works with torch/np/jnp.
     ... Can be 0 or more batch dimensions.
+    The hardcoded polynomials for deg 5 refer to https://www.ppsloan.org/publications/StupidSH36.pdf.
     Args:
-        deg: int SH deg. Currently, 0-3 supported
+        deg: int SH deg. Currently, 0-5 supported
         sh: jnp.ndarray SH coeffs [..., C, (deg + 1) ** 2]
         dirs: jnp.ndarray unit directions [..., 3]
     Returns:
         [..., C]
     """
-    assert deg <= 4 and deg >= 0
+    assert deg <= 5 and deg >= 0
     coeff = (deg + 1) ** 2
     assert sh.shape[-1] >= coeff
 
@@ -109,6 +125,20 @@ def eval_sh(deg, sh, dirs):
                             C4[6] * (xx - yy) * (7 * zz - 1) * sh[..., 22] +
                             C4[7] * xz * (xx - 3 * yy) * sh[..., 23] +
                             C4[8] * (xx * (xx - 3 * yy) - yy * (3 * xx - yy)) * sh[..., 24])
+
+                if deg > 4:
+                        result = (result +
+                                C5[0] * (5 * xx * xx - 10 * yy * xx + yy * yy) * sh[..., 25] +
+                                C5[1] * xy * z * (xx - yy) * sh[..., 26] +
+                                C5[2] * y * (9 * zz - 1) * (3 * xx - yy) * sh[..., 27] +
+                                C5[3] * xy * z * (3 * zz - 1) * sh[..., 28] +
+                                C5[4] * y * (zz * (-14 + 21 * zz) + 1) * sh[..., 29] +
+                                C5[5] * z * (zz * (63 * zz - 70) + 15) * sh[..., 30] +
+                                C5[6] * x * (zz * (21 * zz - 14) + 15) * sh[..., 31] +
+                                C5[7] * z * (xx - yy) * (-1 + 3 * zz) * sh[..., 32] +
+                                C5[8] * x * (xx - 3 * yy) * (-1 + 9 * zz) * sh[..., 33] +
+                                C5[9] * z * (xx * (xx - 6 * yy) + yy * yy) * sh[..., 34] +
+                                C5[10] * x * (xx * (xx - 10 * yy) + 5 * yy * yy) * sh[..., 35])
     return result
 
 def RGB2SH(rgb):
@@ -116,3 +146,48 @@ def RGB2SH(rgb):
 
 def SH2RGB(sh):
     return sh * C0 + 0.5
+
+def gauss_kernel(roughness, sh_degree):
+    """The function computes the sh_dim coefficients of
+    Gauss Weierstrass kernel for smoothing in SH domain. The smoothing 
+    strenght is proportional to the roughness.
+    Args:
+        roughness (torch.tensor): tensor of shape [..., 1] with roughness values
+        sh_degree (int): degree of the spherical harmonics coefficients.
+    Returns:
+        SH coefficients of Gaussian smoothing kernel of windowing strength proportional to the roughness
+    """
+    l_idxs = torch.arange(sh_degree + 1, dtype=torch.float32).view(1, -1).cuda()
+    gw_kernel_sh = torch.zeros((roughness.shape[0],(sh_degree + 1)**2)).cuda()
+    gw_kernel_sh_l = torch.exp(-l_idxs*(l_idxs+1)*(0.3 * roughness)).cuda()
+    for l in range(l_idxs.shape[1]):
+        if l == 0:
+            gw_kernel_sh[..., l] = gw_kernel_sh_l[..., l]
+            continue 
+        gw_kernel_sh[..., l**2:(l+1)**2] = gw_kernel_sh_l[..., l].unsqueeze(-1).expand_as(gw_kernel_sh[..., l**2:(l+1)**2])
+
+    return gw_kernel_sh
+
+
+def gamma_correction(rgb: torch.Tensor, gamma=2.2):
+    rgb = rgb.clamp(min=0.0, max=1.0) + 1e-4
+    rgb = rgb.pow(1. / gamma)
+    return rgb
+
+
+def render_sh_map(sh, width: int = 600, gamma_correct:bool=False)->torch.tensor:
+    """Render sh map given sh coefficients
+        Args:
+        sh (torch.tensor, numpy.ndarray): sh coefficients of shape [..., (sh_deg + 1)**2, 3]
+        Returns:
+        rendered sh map """
+    if isinstance(sh, torch.Tensor):     
+        rendered_sh = torch.tensor(sh_render(sh.cpu().numpy(), width = width))
+    else:
+        rendered_sh = torch.tensor(sh_render(sh, width = width))
+    if gamma_correct:
+        rendered_sh = gamma_correction(rendered_sh)
+    else:
+        rendered_sh = torch.clamp(rendered_sh, 0, 1)
+
+    return rendered_sh

@@ -15,14 +15,28 @@ from diff_surfel_rasterization import GaussianRasterizationSettings, GaussianRas
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.point_utils import depth_to_normal
+from scene.NVDIFFREC.light import EnvironmentLight
+from utils.normal_utils import compute_normal_world_space
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
+# Technically DONE, probably it will fail while running but all good.
+# Multiplier is a tensor that indicates which gaussians are flipped and which are not. (Check lumigauss)
+
+def get_shaded_colors(envlight: EnvironmentLight, pos: torch.tensor, view_pos: torch.tensor, normal: torch.tensor=None, albedo: torch.tensor=None, 
+                       roughness:torch.tensor=None, metalness:torch.tensor=None, specular:bool=True):
+    if metalness is not None:
+        metalness = metalness[None, None, ...]
+    colors_precomp, brdf_pkg = envlight.shade(gb_pos=pos[None, None, ...], gb_normal=normal[None, None, ...], albedo=albedo[None, None, ...],
+                            view_pos=view_pos[None, None, ...], kr=roughness[None, None, ...], km=metalness, specular=specular)
+    return colors_precomp, brdf_pkg
+
+
+def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky_sh: torch.tensor, sky_sh_degree: int, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, debug=True, specular=True, fix_sky=False):
     """
     Render the scene. 
     
     Background tensor (bg_color) must be on GPU!
     """
- 
+
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
@@ -43,7 +57,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
-        sh_degree=pc.active_sh_degree,
+        sh_degree=-1, # sh_degree is -1 for envlight (idk why) to not use SHs at all!! # TODO: See if it works
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=False,
@@ -76,35 +90,55 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         scales = pc.get_scaling
         rotations = pc.get_rotation
-    
-    # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
-    # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
-    pipe.convert_SHs_python = False
-    shs = None
-    colors_precomp = None
-    if override_color is None:
-        if pipe.convert_SHs_python:
-            shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
-            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
-            dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
-            sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
-            colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
-        else:
-            shs = pc.get_features
+
+    sky_mask = viewpoint_camera.sky_mask.cuda().squeeze()
+    sky_gaussians_mask = pc.get_is_sky.squeeze() # (N)
+    positions = pc.get_xyz # (N, 3)
+    albedo = pc.get_albedo # (N, 3)
+    roughness = pc.get_roughness # (N, 1)
+    metalness = pc.get_metalness # (N,1)
+    view_pos = viewpoint_camera.camera_center.repeat(pc.get_opacity.shape[0], 1) # (N, 3)
+    dir_pp = (pc.get_xyz - view_pos) # Vector from camera center to each gaussian (N, 3)
+    dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True) # Unit vectors pointing from camera to each gaussian (N, 3)
+
+    normal, multiplier = compute_normal_world_space(rotations, scales, viewpoint_camera.world_view_transform, positions) # TODO add the multiplier to the codebase!!
+    colors_precomp, diffuse_color, specular_color, sky_color = (torch.zeros(positions.shape[0], 3, dtype=torch.float32, device="cuda") for _ in range(4))
+    # Compute color for the foreground Gaussians
+    color_fg_gaussians, brdf_pkg = get_shaded_colors(envlight=envlight, pos=positions[~sky_gaussians_mask],
+                                                          view_pos=view_pos[~sky_gaussians_mask], normal=normal[~sky_gaussians_mask],
+                                                          albedo=albedo,
+                                                          roughness=roughness, metalness=metalness,
+                                                          specular=specular)
+    colors_precomp[~sky_gaussians_mask] = color_fg_gaussians.squeeze() # Give color to foreground Gaussians
+
+    # Compute color for the sky (background) Gaussians
+    if fix_sky:
+        colors_precomp[sky_gaussians_mask] = torch.ones_like(positions[sky_gaussians_mask])
     else:
-        colors_precomp = override_color
-    
+        sky_sh2rgb = eval_sh(sky_sh_degree, sky_sh.transpose(1,2), dir_pp_normalized[sky_gaussians_mask])
+        color_sky_gaussians = torch.clamp_min(sky_sh2rgb + 0.5, 0.0)
+        colors_precomp[sky_gaussians_mask] = color_sky_gaussians
+                                           
+    # Set diffuse and specular colors for the foreground Gaussians
+    diffuse_color[sky_gaussians_mask] = torch.zeros_like(colors_precomp[sky_gaussians_mask])
+    diffuse_color[~sky_gaussians_mask] = brdf_pkg['diffuse'].squeeze()
+    specular_color[sky_gaussians_mask] = torch.zeros_like(colors_precomp[sky_gaussians_mask])
+    specular_color[~sky_gaussians_mask] = brdf_pkg['specular'].squeeze()
+
+    # Set sky color for the sky (background) Gaussians
+    sky_color[sky_gaussians_mask] = colors_precomp[sky_gaussians_mask]
+    sky_color[~sky_gaussians_mask] = torch.zeros_like(colors_precomp[~sky_gaussians_mask])
+
     rendered_image, radii, allmap = rasterizer(
         means3D = means3D,
         means2D = means2D,
-        shs = shs,
+        shs = None,
         colors_precomp = colors_precomp,
         opacities = opacity,
         scales = scales,
         rotations = rotations,
-        cov3D_precomp = cov3D_precomp
-    )
-    
+        cov3D_precomp = cov3D_precomp)
+
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     rets =  {"render": rendered_image,
@@ -112,7 +146,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "visibility_filter" : radii > 0,
             "radii": radii,
     }
-
 
     # additional regularizations
     render_alpha = allmap[1:2]
@@ -155,4 +188,32 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             'surf_normal': surf_normal,
     })
 
+    render_extras = {"diffuse_color": diffuse_color, "specular_color": specular_color}
+
+    if debug:
+        roughness_all = torch.zeros((positions.shape[0], 1), device="cuda", dtype=torch.float32)
+        roughness_all[~sky_gaussians_mask] = roughness
+        metalness_all = torch.zeros((positions.shape[0], 1), device="cuda", dtype=torch.float32)
+        metalness_all[~sky_gaussians_mask] = metalness
+        albedo_all = torch.ones_like(positions)
+        albedo_all[~sky_gaussians_mask] = albedo
+
+        render_extras.update({
+            "sky_color": sky_color,
+            "roughness": roughness_all.repeat(1, 3),
+            "metalness": metalness_all.repeat(1, 3),
+            "albedo": albedo_all})
+
+    for name, color in render_extras.items():
+        if color is not None:
+            rets[name] = rasterizer(
+                means3D=means3D,
+                means2D=means2D,
+                shs=None,
+                colors_precomp=color,
+                opacities=opacity,
+                scales=scales,
+                rotations=rotations,
+                cov3D_precomp=cov3D_precomp
+            )[0]
     return rets

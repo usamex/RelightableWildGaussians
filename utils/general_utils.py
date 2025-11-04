@@ -14,6 +14,12 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
+import math
+from pathlib import Path
+
+
+def grad_thr_exp_scheduling(iter, max_iter, grad_thr_start, grad_thr_end=0.0004): # TODO: Take a look at this later
+    return np.exp(np.log(grad_thr_start)*(1-iter/max_iter)+np.log(grad_thr_end)*(iter/max_iter))
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -132,34 +138,6 @@ def safe_state(silent):
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
 
-
-
-
-def create_rotation_matrix_from_direction_vector_batch(direction_vectors):
-    # Normalize the batch of direction vectors
-    direction_vectors = direction_vectors / torch.norm(direction_vectors, dim=-1, keepdim=True)
-    # Create a batch of arbitrary vectors that are not collinear with the direction vectors
-    v1 = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32).to(direction_vectors.device).expand(direction_vectors.shape[0], -1).clone()
-    is_collinear = torch.all(torch.abs(direction_vectors - v1) < 1e-5, dim=-1)
-    v1[is_collinear] = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32).to(direction_vectors.device)
-
-    # Calculate the first orthogonal vectors
-    v1 = torch.cross(direction_vectors, v1)
-    v1 = v1 / (torch.norm(v1, dim=-1, keepdim=True))
-    # Calculate the second orthogonal vectors by taking the cross product
-    v2 = torch.cross(direction_vectors, v1)
-    v2 = v2 / (torch.norm(v2, dim=-1, keepdim=True))
-    # Create the batch of rotation matrices with the direction vectors as the last columns
-    rotation_matrices = torch.stack((v1, v2, direction_vectors), dim=-1)
-    return rotation_matrices
-
-# from kornia.geometry import conversions
-# def normal_to_rotation(normals):
-#     rotations = create_rotation_matrix_from_direction_vector_batch(normals)
-#     rotations = conversions.rotation_matrix_to_quaternion(rotations,eps=1e-5, order=conversions.QuaternionCoeffOrder.WXYZ)
-#     return rotations
-
-
 def colormap(img, cmap='jet'):
     import matplotlib.pyplot as plt
     W, H = img.shape[:2]
@@ -181,3 +159,81 @@ def assert_not_none(value):
     if value is None:
         raise ValueError("Value cannot be None")
     return value
+
+def rand_hemisphere_dir(N: torch.Tensor, n: torch.Tensor):
+    """
+    Sample a cosine-weighted random direction on the unit hemisphere oriented around vector n.
+    In case of multiple normal vectors stored in n, N samples are generated for each. The tensor storing 
+    n is expected to have len(n.shape) == 2, where the first dimension refers to the number of input normal 
+    vectors.
+    Args:
+        N: number of samples,
+        n: normal vector of shape L x 3
+    Returns:
+        d (torch.Tensor): sampled cosine weighted direction of shape L x N x 3.
+    """
+    assert len(n.shape) == 2 and n.shape[-1] == 3 , "error: n must have size  L X 3"
+
+    # sample N points on the unit sphere
+    rand = torch.rand(n.shape[0], N, 3).cuda()
+    normals = n.repeat(N, 1 , 1).transpose(0,1)
+    phi = 2*np.pi*rand[...,1] # phi in [0, 2pi), shape N x n.shape[0]
+    d = torch.zeros_like(normals)
+    d[..., 0] = torch.cos(phi) * torch.sqrt(rand[...,0])
+    d[..., 1] = torch.sin(phi) * torch.sqrt(rand[...,0])
+    d[...,2] = torch.sqrt(1- torch.linalg.vector_norm(d, dim = -1)**2)
+    # orient points around corresponding normal vectorſ
+    tangent = torch.nn.functional.normalize(rand, dim=-1)
+    bitangent = torch.linalg.cross(tangent, normals) # cross product along dim=-1
+    d = tangent * d[...,0].unsqueeze(-1) + bitangent * d[...,1].unsqueeze(-1) + normals * d[...,2].unsqueeze(-1) 
+
+    return d
+
+def get_uniform_points_on_sphere_fibonacci(num_points, *, dtype=None, xnp=torch): # TODO: Take a look at this later
+    # https://arxiv.org/pdf/0912.4540.pdf
+    # Golden angle in radians
+    if dtype is None:
+        dtype = xnp.float32
+    phi = math.pi * (3. - math.sqrt(5.))
+    N = (num_points - 1) / 2
+    i = xnp.linspace(-N, N, num_points, dtype=dtype)
+    lat = xnp.arcsin(2.0 * i / (2*N+1))
+    lon = phi * i
+
+    # Spherical to cartesian
+    x = xnp.cos(lon) * xnp.cos(lat)
+    y = xnp.sin(lon) * xnp.cos(lat)
+    z = xnp.sin(lat)
+    return xnp.stack([x, y, z], -1)
+
+
+def sample_points_on_unit_hemisphere(num_points, *, dtype=None, xnp=torch):
+    if dtype is None:
+        dtype = xnp.float32
+    # Sample points on a portion of the unit hemisphere (COLMAP coordinates system)
+    torch.manual_seed(0)
+    y = - 0.5 * xnp.rand(num_points)
+    theta = torch.acos(y)
+    phi = xnp.pi*(1/2) * xnp.rand(num_points) - xnp.pi/4 # phi in [-pi/4, pi/4]
+    # Spherical to cartesian
+    x = xnp.sin(phi) * xnp.sin(theta)
+    z = xnp.sin(theta) * xnp.cos(phi)
+    return xnp.stack([x, y, z], -1)
+
+
+def load_npy_tensors(path: Path):
+    """The function loads all npy tensors in path."""
+    npy_tensors = {}
+    npy_tensors_fnames = path.glob("*.npy")
+
+    for npy_tensor_fname in npy_tensors_fnames:
+        npy_tensor = np.load(npy_tensor_fname)
+        npy_tensors[str(npy_tensor_fname)] = npy_tensor
+
+    return npy_tensors
+
+def cartesian_to_polar_coord(xyz: torch.tensor, center: torch.tensor=torch.zeros(3, dtype=torch.float32, device="cuda"), radius: float=1.0):
+        theta = torch.acos(torch.clamp((-xyz[...,1] + center[1])/radius, -1, 1)).unsqueeze(1)
+        phi = torch.atan2(xyz[..., 0] - center[0], xyz[..., 2] - center[2]).unsqueeze(1)
+        angles = torch.cat((theta, phi), dim=1)
+        return angles
