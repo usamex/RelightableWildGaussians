@@ -9,7 +9,6 @@ A PyTorch implementation of 3D Gaussian Splatting with relighting capabilities f
 - **Uncertainty-Aware Training**: DINO-based uncertainty estimation for robust optimization
 - **Sky/Outdoor Scene Support**: Special handling for sky regions and outdoor illumination
 - **Physics-Based Rendering**: BRDF-based rendering with diffuse components
-- **Multiple Dataset Support**: Compatible with NeRF, Mip-NeRF 360, DTU, and Tanks & Temples datasets
 
 ## Installation
 
