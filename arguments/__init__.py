@@ -110,8 +110,6 @@ class OptimizationParams(ParamGroup):
 
         # Relighting Parameters
         self.embednet_pretrain_epochs = 50
-        self.roughness_lr = 0.0002
-        self.metalness_lr = 0.0002
         self.albedo_lr = 0.0002
         self.lambda_envlight = 0.05
         self.mlp_lr = 0.0002

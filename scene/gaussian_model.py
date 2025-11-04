@@ -65,13 +65,8 @@ class GaussianModel:
         self._sky_gauss_center = torch.empty(0, device="cuda")
         self._sky_angles = torch.empty(0, device="cuda")
 
-        self._roughness = torch.empty(0, device="cuda")
-        self._metalness = torch.empty(0, device="cuda")
-
         self.material_properties_activation = torch.sigmoid
-        self.default_roughness = 1.0
         self.default_albedo = 1.0
-        self.default_metalness = 0.1
 
         self.denom = torch.empty(0, device="cuda")
         self.optimizer = None
@@ -106,8 +101,6 @@ class GaussianModel:
             self._sky_radius,
             self._sky_gauss_center,
             self._sky_angles,
-            self._metalness,
-            self._roughness,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
@@ -125,8 +118,6 @@ class GaussianModel:
         self._sky_radius,
         self._sky_gauss_center,
         self._sky_angles,
-        self._metalness,
-        self._roughness,
         opt_dict, 
         self.spatial_lr_scale) = model_args
 
@@ -177,14 +168,6 @@ class GaussianModel:
         return self.material_properties_activation(self._albedo)
 
     @property
-    def get_metalness(self):
-        return self.material_properties_activation(self._metalness)
-
-    @property
-    def get_roughness(self):
-        return self.material_properties_activation(self._roughness)
-
-    @property
     def get_sky_angles(self): # TODO: Not sure if this is correct
         # theta admitted range: [0, pi/2], phi admitted range: [-pi/2, pi/2]
         theta_mask = (self._sky_angles[...,0] < 0) | (self._sky_angles[...,0] > torch.pi/2)
@@ -228,8 +211,6 @@ class GaussianModel:
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
 
         self._albedo = nn.Parameter(self.default_albedo * torch.ones((fused_point_cloud.shape[0], 3), device="cuda").requires_grad_(True))
-        self._metalness = nn.Parameter(self.default_metalness * torch.ones((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
-        self._roughness = nn.Parameter(self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
         self._is_sky =  torch.zeros((fused_point_cloud.shape[0], 1), dtype=torch.bool, device="cuda")
 
         self._scaling = nn.Parameter(scales.requires_grad_(True))
@@ -295,8 +276,6 @@ class GaussianModel:
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
-            {'params': [self._roughness], 'lr': training_args.roughness_lr, "name": "roughness"},
-            {'params': [self._metalness], 'lr': training_args.metalness_lr, "name": "metalness"},
             {'params': [self._sky_radius], 'lr': training_args.sky_radius_lr, "name": "sky_radius"},
             {'params': [self._sky_angles], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "sky_angles"},
 
@@ -337,8 +316,6 @@ class GaussianModel:
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
-        l.append('roughness')
-        l.append('metalness')
         l.append('is_sky')
         if torch.sum(self._is_sky) > 0:
             l.append('sky_radius')
@@ -364,14 +341,6 @@ class GaussianModel:
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
 
-        roughness = torch.zeros_like(self.get_opacity)
-        roughness[fg_pts_mask] = self._roughness
-        roughness = roughness.detach().cpu().numpy()
-
-        metalness = torch.zeros_like(self.get_opacity)
-        metalness[fg_pts_mask] = self._metalness
-        metalness = metalness.detach().cpu().numpy()
-
         is_sky = self._is_sky.cpu().numpy()
         sky_radius = self._sky_radius.repeat(xyz.shape[0],1).detach().cpu().numpy()
         sky_gauss_center = self._sky_gauss_center.repeat(xyz.shape[0],1).cpu().numpy()
@@ -383,9 +352,10 @@ class GaussianModel:
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         if torch.sum(self._is_sky) > 0:
-            attributes = np.concatenate((xyz, normals, albedo, opacities, scale, rotation, roughness, metalness, is_sky, sky_radius, sky_gauss_center, sky_angles), axis=1)
+            attributes = np.concatenate((xyz, normals, albedo, opacities, scale, rotation, is_sky, sky_radius, sky_gauss_center, sky_angles), axis=1)
+
         else:
-            attributes = np.concatenate((xyz, normals, albedo, opacities, scale, rotation, roughness, metalness, is_sky), axis=1)
+            attributes = np.concatenate((xyz, normals, albedo, opacities, scale, rotation, is_sky), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -420,9 +390,6 @@ class GaussianModel:
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
-        roughness = np.asarray(plydata.elements[0]["roughness"])[..., np.newaxis]
-        metalness = np.asarray(plydata.elements[0]["metalness"])[..., np.newaxis]
-        
         is_sky = np.asarray(plydata.elements[0]["is_sky"], dtype=bool)[..., np.newaxis]
         
         sky_radius = np.asarray(plydata.elements[0]["sky_radius"])[0]
@@ -445,8 +412,6 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
-        self._roughness = nn.Parameter(torch.tensor(roughness[~(is_sky.squeeze())], dtype=torch.float, device="cuda").requires_grad_(True))
-        self._metalness = nn.Parameter(torch.tensor(metalness[~(is_sky.squeeze())], dtype=torch.float, device="cuda").requires_grad_(True))
         self._is_sky = torch.tensor(is_sky, dtype=torch.bool, device="cuda")
         self._sky_radius = nn.Parameter(torch.tensor(sky_radius, dtype=torch.float, device="cuda").requires_grad_(True))
         self._sky_gauss_center = nn.Parameter(torch.tensor(sky_gauss_center, dtype=torch.float, device="cuda"))
@@ -474,7 +439,7 @@ class GaussianModel:
         for group in self.optimizer.param_groups:
             if group["name"] in ["uncertainty_model", "mlp", "embeddings", "sky_radius"]:
                 continue
-            if group["name"] in ["xyz", "albedo", "metalness", "roughness"]: # TODO: Take a look at this later
+            if group["name"] in ["xyz", "albedo"]:
                 mask_prune = mask_fg
             elif group["name"] == "sky_angles":
                 mask_prune = mask_sky
@@ -506,8 +471,6 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        self._roughness = optimizable_tensors["roughness"]
-        self._metalness = optimizable_tensors["metalness"]
         self._sky_angles = optimizable_tensors["sky_angles"]
         self._is_sky = self._is_sky[valid_points_mask]
 
@@ -540,19 +503,16 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_albedo, new_opacities, new_scaling, new_rotation,
-                              new_roughness, new_metalness, new_is_sky, new_sky_angles):
+    def densification_postfix(self, new_xyz, new_albedo, new_opacities, new_scaling, new_rotation, new_is_sky, new_sky_angles):
         d = {"albedo": new_albedo,
         "opacity": new_opacities,
         "scaling" : new_scaling,
-        "rotation" : new_rotation,
-        "roughness": new_roughness,
-        "metalness": new_metalness}
+        "rotation" : new_rotation}
+
         if new_sky_angles is not None:
             d.update({"sky_angles": new_sky_angles})
         if new_xyz is not None:
             d.update({"xyz": new_xyz})
-        # print(d)
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         if "xyz" in optimizable_tensors.keys():
             self._xyz = optimizable_tensors["xyz"]
@@ -560,8 +520,7 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        self._roughness = optimizable_tensors["roughness"]
-        self._metalness = optimizable_tensors["metalness"]
+
         if "sky_angles" in optimizable_tensors.keys():
             self._sky_angles = optimizable_tensors["sky_angles"] # TODO: Take a look at this later
         self._sky_angles = optimizable_tensors["sky_angles"]
@@ -593,8 +552,6 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_albedo = self._albedo[selected_fg_pts_mask].repeat(N,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        new_roughness = self._roughness[selected_fg_pts_mask].repeat(N,1)
-        new_metalness = self._metalness[selected_fg_pts_mask].repeat(N,1)
         new_is_sky = self._is_sky[selected_pts_mask].repeat(N,1)
 
         # Project sampled positions for sky Gaussians on the sphere (idk wtf this is) TODO
@@ -604,8 +561,7 @@ class GaussianModel:
         else:
             new_sky_angles = None
 
-        self.densification_postfix(new_xyz[~(new_is_sky.squeeze())], new_albedo, new_opacity, new_scaling, new_rotation,
-                                   new_roughness, new_metalness, new_is_sky, new_sky_angles) # TODO: Take a look at this later
+        self.densification_postfix(new_xyz[~(new_is_sky.squeeze())], new_albedo, new_opacity, new_scaling, new_rotation, new_is_sky, new_sky_angles) # TODO: Take a look at this later
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -623,12 +579,9 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
-        new_roughness = self._roughness[selected_fg_pts_mask]
-        new_metalness = self._metalness[selected_fg_pts_mask]
         new_sky_angles = self._sky_angles[selected_sky_pts_mask]
         new_is_sky = self._is_sky[selected_pts_mask]
-        self.densification_postfix(new_xyz, new_albedo, new_opacities, new_scaling, new_rotation,
-                                   new_roughness, new_metalness, new_is_sky, new_sky_angles)
+        self.densification_postfix(new_xyz, new_albedo, new_opacities, new_scaling, new_rotation, new_is_sky, new_sky_angles)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom

@@ -343,8 +343,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     reconstructed_envlight = scene.gaussians.envlight.render_sh().cuda().permute(2,0,1)
                     reconstructed_sky_map = render_sh_map(sky_sh.squeeze()).cuda().permute(2,0,1)
-                    specular_light = scene.gaussians.envlight.get_specular_light_sh(torch.mean(scene.gaussians.get_roughness).unsqueeze(0))
-                    reconstructed_spec_light = render_sh_map(specular_light.squeeze(), gamma_correct=True).cuda().permute(2,0,1)
+
                     if tb_writer and (idx < 5):
                         from utils.general_utils import colormap
                         depth = render_pkg["surf_depth"]
@@ -355,7 +354,6 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         tb_writer.add_images(config['name'] + "_view_{}/reconstructed_envlight".format(viewpoint.image_name), reconstructed_envlight[None], global_step=iteration)
                         tb_writer.add_images(config['name'] + "_view_{}/reconstructed_sky_map".format(viewpoint.image_name), reconstructed_sky_map[None], global_step=iteration)
-                        tb_writer.add_images(config['name'] + "_view_{}/reconstructed_spec_light".format(viewpoint.image_name), reconstructed_spec_light[None], global_step=iteration)
 
                         try:
                             rend_alpha = render_pkg['rend_alpha']
@@ -369,7 +367,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                             rend_dist = colormap(rend_dist.cpu().numpy()[0])
                             tb_writer.add_images(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name), rend_dist[None], global_step=iteration)
                             for k in render_pkg.keys():
-                                if k in ["diffuse_color", "specular_color", "sky_color", "roughness", "metalness", "albedo"]:
+                                if k in ["diffuse_color", "sky_color", "albedo"]:
                                     tb_writer.add_images(config['name'] + "_view_{}/{}".format(viewpoint.image_name, k), render_pkg[k][None], global_step=iteration)
                         except:
                             pass
@@ -389,8 +387,6 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
-            tb_writer.add_histogram("scene/roughness_histogram", scene.gaussians.get_roughness, iteration)
-            tb_writer.add_histogram("scene/metalness_histogram", scene.gaussians.get_metalness, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
