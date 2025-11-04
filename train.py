@@ -120,7 +120,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
 
         render_pkg = render(viewpoint_cam, gaussians, gaussians.envlight, sky_sh, dataset.sky_sh_degree, pipe, background, debug=False, fix_sky=dataset.fix_sky, specular=False)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        diff_col, spec_col = render_pkg["diffuse_color"], render_pkg["specular_color"]
+        diff_col = render_pkg["diffuse_color"]
 
         # Uncertainty computation
         uncertainty_loss = 0
@@ -158,7 +158,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
         
         # Apply loss multipliers for uncertainty weighting
         base_loss = (1.0 - opt.lambda_dssim) * (Ll1 * loss_mult).mean() + opt.lambda_dssim * ((1.0 - ssim_value) * loss_mult).mean()
-        sky_loss = opt.lambda_sky_brdf * (l1_loss(diff_col, torch.zeros_like(diff_col), mask=(1-sky_mask)) + l1_loss(spec_col, torch.zeros_like(spec_col), mask=(1-sky_mask)))
+        sky_loss = opt.lambda_sky_brdf * l1_loss(diff_col, gt_image, mask=(1-sky_mask))
 
         # regularization DO NOT TOUCH
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
