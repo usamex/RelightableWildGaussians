@@ -112,7 +112,7 @@ def render(viewpoint_camera, pc : GaussianModel, envlight: EnvironmentLight, sky
         color_sky_gaussians = torch.clamp_min(sky_sh2rgb + 0.5, 0.0)
         colors_precomp[sky_gaussians_mask] = color_sky_gaussians
                                            
-    # Set diffuse and specular colors for the foreground Gaussians
+    # Set diffuse colors for the foreground Gaussians
     diffuse_color[sky_gaussians_mask] = torch.zeros_like(colors_precomp[sky_gaussians_mask])
     diffuse_color[~sky_gaussians_mask] = brdf_pkg['diffuse'].squeeze()
 

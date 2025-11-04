@@ -118,7 +118,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
         # if sky_mask is not None:
         #     image = scale_grads(image, sky_mask)
 
-        render_pkg = render(viewpoint_cam, gaussians, gaussians.envlight, sky_sh, dataset.sky_sh_degree, pipe, background, debug=False, fix_sky=dataset.fix_sky, specular=False)
+        render_pkg = render(viewpoint_cam, gaussians, gaussians.envlight, sky_sh, dataset.sky_sh_degree, pipe, background, debug=False, fix_sky=dataset.fix_sky)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         diff_col = render_pkg["diffuse_color"]
 
@@ -242,7 +242,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipe: PipelineParams
                     for key, value in uncertainty_metrics.items():
                         tb_writer.add_scalar(f'uncertainty_metrics/{key}', value, iteration)
 
-            training_report(tb_writer, iteration, Ll1.mean(), base_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, renderArgs={"sky_sh_degree": dataset.sky_sh_degree, "pipe": pipe, "background": background, "debug": True, "fix_sky": dataset.fix_sky, "specular": dataset.specular}, appearance_lut=appearance_lut, source_path=dataset.source_path)
+            training_report(tb_writer, iteration, Ll1.mean(), base_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, renderArgs={"sky_sh_degree": dataset.sky_sh_degree, "pipe": pipe, "background": background, "debug": True, "fix_sky": dataset.fix_sky}, appearance_lut=appearance_lut, source_path=dataset.source_path)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -338,7 +338,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     envlight_sh, sky_sh = scene.gaussians.compute_env_sh(emb_idx)
                     scene.gaussians.envlight.set_base(envlight_sh)
                     render_pkg = renderFunc(viewpoint, scene.gaussians, scene.gaussians.envlight, sky_sh, renderArgs["sky_sh_degree"], renderArgs["pipe"],
-                                                renderArgs["background"], debug=renderArgs["debug"], fix_sky=renderArgs["fix_sky"], specular=False)
+                                                renderArgs["background"], debug=renderArgs["debug"], fix_sky=renderArgs["fix_sky"])
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     reconstructed_envlight = scene.gaussians.envlight.render_sh().cuda().permute(2,0,1)
